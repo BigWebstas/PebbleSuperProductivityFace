@@ -40,6 +40,8 @@ face runs its own trimmed SuperSync client.
 - Battery gauge is green / amber / red by level, cyan while charging; below
   10% the outline turns red and an alert pip appears beside it.
 - `Xh left` turns red when the estimate overshoots the end of the day.
+- The tracked-task line turns red with a `!` once the timer passes that
+  task's own estimate.
 - Today's sparkline bar is green; the rest are blue. The date is grey.
 - The tracked-task line is green.
 

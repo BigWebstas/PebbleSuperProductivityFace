@@ -46,7 +46,8 @@
       "FACE_HABIT_TITLE",
       "FACE_WEEK_CSV",
       "FACE_TRACKING_TITLE",
-      "FACE_TRACKING_ELAPSED_S"
+      "FACE_TRACKING_ELAPSED_S",
+      "FACE_TRACKING_OVER_S"
     ]
   }
 }

@@ -24,6 +24,7 @@
 #define KEY_WEEK_CSV         MESSAGE_KEY_FACE_WEEK_CSV      // "m0,m1,...,m6" minutes/day, [6]=today
 #define KEY_TRACK_TITLE      MESSAGE_KEY_FACE_TRACKING_TITLE  // "" = not tracking
 #define KEY_TRACK_ELAPSED_S  MESSAGE_KEY_FACE_TRACKING_ELAPSED_S
+#define KEY_TRACK_OVER_S     MESSAGE_KEY_FACE_TRACKING_OVER_S  // session secs at which it passes its estimate, -1 = n/a
 
 #define MSG_REFRESH_REQUEST 1
 
@@ -52,6 +53,7 @@ static char s_hab_title[24] = "";
 static int s_week[7] = {0};
 static char s_track_title[40] = "";
 static int s_track_elapsed_s = 0;   // as of s_track_received; the tick advances it
+static int s_track_over_s = -1;     // session secs at which the task passes its estimate (-1 = n/a)
 static time_t s_track_received = 0;
 static time_t s_last_ok = 0;
 
@@ -167,12 +169,15 @@ static void render_status(void) {
   } else if (is_tracking()) {
     int e = track_now_elapsed_s();
     int h = e / 3600, m = (e % 3600) / 60, s = e % 60;
+    bool over = s_track_over_s >= 0 && e >= s_track_over_s;
+    const char *mark = over ? "! " : "";
     if (h > 0) {
-      snprintf(s_status_buf, sizeof(s_status_buf), "▶ %d:%02d:%02d  %s", h, m, s, s_track_title);
+      snprintf(s_status_buf, sizeof(s_status_buf), "%s▶ %d:%02d:%02d  %s", mark, h, m, s, s_track_title);
     } else {
-      snprintf(s_status_buf, sizeof(s_status_buf), "▶ %d:%02d  %s", m, s, s_track_title);
+      snprintf(s_status_buf, sizeof(s_status_buf), "%s▶ %d:%02d  %s", mark, m, s, s_track_title);
     }
-    s_status_color = PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
+    s_status_color = over ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite)
+                          : PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
   } else {
     render_status_stats();
     if (s_status_warn) { s_status_color = PBL_IF_COLOR_ELSE(GColorRed, GColorWhite); }
@@ -628,6 +633,8 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   {
     Tuple *tt = dict_find(iter, KEY_TRACK_TITLE);
     Tuple *te = dict_find(iter, KEY_TRACK_ELAPSED_S);
+    Tuple *to = dict_find(iter, KEY_TRACK_OVER_S);
+    if (to) { s_track_over_s = to->value->int32; }
     if (tt) {
       bool changed = strncmp(s_track_title, tt->value->cstring, sizeof(s_track_title) - 1) != 0;
       strncpy(s_track_title, tt->value->cstring, sizeof(s_track_title));

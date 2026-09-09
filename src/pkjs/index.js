@@ -67,17 +67,32 @@ function sendStatus(code) { sendToFace({ MSG_TYPE: 0, FACE_STATUS: code }); }
 // Currently-tracked task from the presence WebSocket (opt-in), or null.
 var trackedView = null; // { title, sinceTs } or { opaque:true }
 
+// Seconds of *this session* at which the tracked task tips past its estimate,
+// or -1 when it has no estimate / isn't a known task. The watch compares this
+// against its live timer so the line can go red the moment it crosses.
+function trackedOverS() {
+  try {
+    if (!trackedView || !trackedView.taskId) { return -1; }
+    var t = loadState().task[trackedView.taskId];
+    if (!t || !t.timeEstimate || t.timeEstimate <= 0) { return -1; }
+    return Math.max(0, Math.round((t.timeEstimate - (t.timeSpent || 0)) / 1000));
+  } catch (e) { return -1; }
+}
+
 function pushTracking() {
   var dict = { MSG_TYPE: 0 };
   if (presenceClient && trackedView && !trackedView.opaque && trackedView.title) {
     dict.FACE_TRACKING_TITLE = trackedView.title.slice(0, 38);
     dict.FACE_TRACKING_ELAPSED_S = Math.max(0, Math.round((Date.now() - trackedView.sinceTs) / 1000));
+    dict.FACE_TRACKING_OVER_S = trackedOverS();
   } else if (presenceClient && trackedView && trackedView.opaque) {
     dict.FACE_TRACKING_TITLE = 'tracking on another device';
     dict.FACE_TRACKING_ELAPSED_S = 0;
+    dict.FACE_TRACKING_OVER_S = -1;
   } else {
     dict.FACE_TRACKING_TITLE = '';
     dict.FACE_TRACKING_ELAPSED_S = 0;
+    dict.FACE_TRACKING_OVER_S = -1;
   }
   sendToFace(dict);
 }
@@ -198,6 +213,7 @@ function doSync() {
     saveLastSeq(lastSeq);
     lastPollAt = Date.now();
     pushFaceData(state);
+    if (presenceClient && trackedView) { pushTracking(); } // refresh the over-estimate base
   }).catch(function (err) {
     console.log('[spf] sync failed: ' + (err && err.message ? err.message : JSON.stringify(err)));
     sendStatus(STATUS_ERROR);
@@ -247,7 +263,7 @@ function applyPresence(config) {
         var t = loadState().task[view.taskId];
         title = (t && t.title) || 'a task';
       }
-      trackedView = { title: title, sinceTs: view.sinceTs || Date.now() };
+      trackedView = { title: title, sinceTs: view.sinceTs || Date.now(), taskId: view.taskId };
       pushTracking();
     });
     presenceClient.onCleared(function () { trackedView = null; pushTracking(); });
