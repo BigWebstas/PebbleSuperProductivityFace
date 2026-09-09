@@ -11,6 +11,9 @@ face runs its own trimmed SuperSync client.
 - **Steps** (top-left) and a **battery** gauge (top-right); a "no phone" mark
   when Bluetooth drops.
 - A **week sparkline** - minutes worked each of the last 7 days.
+- **Heart rate** (bottom-left, on watches with the sensor) and **tasks left
+  today** (bottom-right). On rectangular screens these sit in the bottom
+  corners, clear of the ring.
 - A **bottom line** that a wrist-tap cycles through:
   - the next timed task (`→ 3:15  Standup`)
   - `N / M done`

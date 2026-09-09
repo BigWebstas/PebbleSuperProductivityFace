@@ -56,6 +56,7 @@ static time_t s_last_ok = 0;
 
 static int s_line_mode = 0;
 static int s_steps = 0;
+static int s_hr = 0;         // last heart-rate reading, BPM (0 = none / no sensor)
 static bool s_bt = true;
 
 static char s_time_buf[8];
@@ -332,21 +333,60 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     }
   }
 
-  // Week sparkline: seven bars, [6] = today (highlighted). Skipped in Quiet Time.
-  if (!dim) {
+  // Lower row: heart rate (left), the week sparkline (centre), tasks-left
+  // (right). All muted in Quiet Time.
+  int base = b.size.h - 40;
+  // On a rectangular screen the HR / tasks labels drop into the bottom
+  // corners, clear of the ring; a round screen has no corners so they stay
+  // level with the sparkline.
+  int corner_y = PBL_IF_RECT_ELSE(b.size.h - 22, base - 18);
+  GFont f14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+
+  // sparkline
+  {
     int maxv = 1;
     for (int i = 0; i < 7; i++) { if (s_week[i] > maxv) { maxv = s_week[i]; } }
     int bw = 6, gap = 3, total_w = 7 * bw + 6 * gap;
     int x0 = (b.size.w - total_w) / 2;
-    int base = b.size.h - 40;
     for (int i = 0; i < 7; i++) {
       int hh = s_week[i] * 12 / maxv;
       if (s_week[i] > 0 && hh < 2) { hh = 2; }
-      graphics_context_set_fill_color(ctx, i == 6
-          ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
-          : PBL_IF_COLOR_ELSE(GColorFromRGB(60, 110, 150), GColorWhite));
+      GColor bar = dim ? GColorDarkGray
+          : (i == 6 ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
+                    : PBL_IF_COLOR_ELSE(GColorFromRGB(60, 110, 150), GColorWhite));
+      graphics_context_set_fill_color(ctx, bar);
       graphics_fill_rect(ctx, GRect(x0 + i * (bw + gap), base - hh, bw, hh), 0, GCornerNone);
     }
+  }
+
+  // heart rate, bottom-left: a tiny heart + BPM
+  if (s_hr > 0) {
+    GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, GColorWhite);
+    int hx = 8, hy = corner_y + 6;
+    graphics_context_set_fill_color(ctx, hc);
+    graphics_fill_circle(ctx, GPoint(hx + 2, hy + 3), 2);
+    graphics_fill_circle(ctx, GPoint(hx + 6, hy + 3), 2);
+    graphics_fill_rect(ctx, GRect(hx, hy + 3, 8, 3), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(hx + 2, hy + 6, 4, 2), 0, GCornerNone);
+    char hb[8];
+    snprintf(hb, sizeof(hb), "%d", s_hr);
+    graphics_context_set_text_color(ctx, hc);
+    graphics_draw_text(ctx, hb, f14, GRect(hx + 12, corner_y, 40, 16),
+                       GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  }
+
+  // tasks remaining today, bottom-right
+  if (s_total > 0) {
+    int left = s_total - s_done;
+    char tb[16];
+    if (left <= 0) { snprintf(tb, sizeof(tb), "all done"); }
+    else { snprintf(tb, sizeof(tb), "%d left", left); }
+    graphics_context_set_text_color(ctx,
+        dim ? GColorDarkGray
+            : (left <= 0 ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
+                         : PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite)));
+    graphics_draw_text(ctx, tb, f14, GRect(b.size.w - 62, corner_y, 56, 16),
+                       GTextOverflowModeFill, GTextAlignmentRight, NULL);
   }
 }
 
@@ -410,6 +450,9 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #if defined(PBL_HEALTH)
   if ((units & MINUTE_UNIT) || s_steps == 0) {
     s_steps = (int)health_service_sum_today(HealthMetricStepCount);
+    // peek returns 0 when there's no recent reading / no sensor.
+    HealthValue bpm = health_service_peek_current_value(HealthMetricHeartRateBPM);
+    s_hr = bpm > 0 ? (int)bpm : 0;
   }
 #endif
 
@@ -614,9 +657,17 @@ static void init(void) {
 
   app_message_register_inbox_received(inbox_received);
   app_message_open(512, 64);
+
+#if defined(PBL_HEALTH)
+  // Ask the HRM for a fresh reading every ~5 min so the quadrant isn't stale.
+  health_service_set_heart_rate_sample_period(300);
+#endif
 }
 
 static void deinit(void) {
+#if defined(PBL_HEALTH)
+  health_service_set_heart_rate_sample_period(0);
+#endif
   save_persisted();
   connection_service_unsubscribe();
   battery_state_service_unsubscribe();
