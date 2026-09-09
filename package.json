@@ -1,0 +1,52 @@
+{
+  "name": "pebble-super-productivity-face",
+  "version": "0.1.0",
+  "description": "Companion watchface for the Super Productivity Pebble watchapp - time plus today-progress pulled from SuperSync.",
+  "author": "BW",
+  "private": true,
+  "keywords": [
+    "pebble-app"
+  ],
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Super Productivity Face",
+    "uuid": "7ec735d1-ad0c-402d-b6e8-127cbcf42417",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "projectType": "native",
+    "capabilities": [
+      "configurable",
+      "health"
+    ],
+    "resources": {
+      "media": []
+    },
+    "messageKeys": [
+      "MSG_TYPE",
+      "FACE_STATUS",
+      "FACE_DONE_TODAY",
+      "FACE_TOTAL_TODAY",
+      "FACE_WORKED_MIN",
+      "FACE_EST_REMAIN_MIN",
+      "FACE_NEXT_MIN",
+      "FACE_NEXT_TITLE",
+      "FACE_HABITS_DONE",
+      "FACE_HABITS_TOTAL",
+      "FACE_HABIT_STREAK",
+      "FACE_HABIT_TITLE",
+      "FACE_WEEK_CSV",
+      "FACE_TRACKING_TITLE",
+      "FACE_TRACKING_ELAPSED_S"
+    ]
+  }
+}
