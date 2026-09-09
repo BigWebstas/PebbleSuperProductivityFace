@@ -30,8 +30,16 @@ face runs its own trimmed SuperSync client.
 - The ring animates to a new fraction, sweeps up from zero on launch, deepens
   from grey-green toward bright green as you finish tasks, turns gold at 100%
   with a one-shot white expanding flash.
-- The bottom line cross-slides on a tap (and marquees a long task name).
-- Battery gauge is green / amber / red by level, cyan while charging.
+- While a timer runs, a bright dot hops around the ring once a minute.
+- On launch the pieces stagger in: the ring sweeps and the sparkline grows,
+  then the minute rolls in, then the bottom line slides up.
+- The minute rolls vertically on each change.
+- The heart icon gives a small thump each time a new reading lands.
+- The bottom line cross-slides on a change and marquees a long task name -
+  scrolling only within the ring, not the full screen width.
+- Battery gauge is green / amber / red by level, cyan while charging; below
+  10% the outline turns red and an alert pip appears beside it.
+- `Xh left` turns red when the estimate overshoots the end of the day.
 - Today's sparkline bar is green; the rest are blue. The date is grey.
 - The tracked-task line is green.
 

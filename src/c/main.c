@@ -36,10 +36,11 @@ enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
 
 static Window *s_window;
 static Layer *s_ring_layer;
-static TextLayer *s_time_layer;
+static Layer *s_time_layer_l;     // custom-drawn: vertical roll on the minute
 static TextLayer *s_date_layer;
 static Layer *s_status_layer_l;   // custom-drawn: colour + slide + marquee
 static Layer *s_top_layer;        // steps / battery / bt
+static GRect s_date_home;         // date layer's resting frame (the intro slides up to it)
 
 static int s_status = 2;
 static int s_done = 0, s_total = 0;
@@ -71,6 +72,11 @@ static GColor s_status_color;
 #define PULSE_TICKS 16         // completion flash length
 #define SLIDE_TICKS 7          // line cross-slide length
 #define MARQUEE_STEP 2
+#define TIME_ROLL_TICKS 6      // minute vertical-roll length
+#define BEAT_TICKS 5           // heart-rate thump length
+#define SPARK_TICKS 8          // sparkline grow-in length
+#define INTRO_TICKS 12         // launch stagger length
+#define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
 static AppTimer *s_anim_timer = NULL;
 static int s_ring_shown = 0;   // per-mille actually drawn
 static int s_ring_target = 0;  // per-mille from done/total
@@ -78,11 +84,19 @@ static int s_pulse_tick = 0;   // 0 = idle
 static int s_slide_tick = 0;   // 0 = idle
 static int s_marquee_off = 0;  // px, status-line scroll
 static bool s_marquee_on = false;
+static int s_time_roll_tick = 0;    // 0 = idle
+static char s_time_prev[8] = "";
+static int s_beat_tick = 0;          // 0 = idle
+static int s_spark_tick = 0;         // 0 = idle (bars at full height)
+static int s_intro_tick = 0;         // 0 = idle
+static bool s_status_warn = false;   // est-remaining overshoots the day -> red line
+static int s_status_w = 148;         // status layer width (set to fit inside the ring)
 
 static void tick_handler(struct tm *t, TimeUnits units);
 static void anim_tick(void *data);
 static void render_status(void);
 static void render_status_stats(void);
+static void time_update_proc(Layer *layer, GContext *ctx);
 
 static void kick_anim(void) {
   if (!s_anim_timer) {
@@ -106,6 +120,13 @@ static void fmt_clock(int mins_since_midnight, char *out, size_t n) {
     int h12 = h % 12; if (h12 == 0) { h12 = 12; }
     snprintf(out, n, "%d:%02d%s", h12, m, h < 12 ? "a" : "p");
   }
+}
+
+static int isqrt_i(int v) {
+  if (v <= 0) { return 0; }
+  int x = v, y = (x + 1) / 2;
+  while (y < x) { x = y; y = (x + v / x) / 2; }
+  return x;
 }
 
 static int track_now_elapsed_s(void) {
@@ -154,6 +175,7 @@ static void render_status(void) {
     s_status_color = PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
   } else {
     render_status_stats();
+    if (s_status_warn) { s_status_color = PBL_IF_COLOR_ELSE(GColorRed, GColorWhite); }
   }
 
   if (qt) { s_status_color = GColorDarkGray; }
@@ -162,7 +184,7 @@ static void render_status(void) {
   // marquee only for an overflowing line (long task names)
   GSize sz = graphics_text_layout_get_content_size(
       s_status_buf, status_font(), GRect(0, 0, 1000, 24), GTextOverflowModeFill, GTextAlignmentLeft);
-  s_marquee_on = sz.w > 160;
+  s_marquee_on = sz.w > s_status_w;
   if (!s_marquee_on) { s_marquee_off = 0; }
 
   // slide only on a real content change - not the per-second timer of the same task
@@ -180,6 +202,7 @@ static void render_status(void) {
 static void render_status_stats(void) {
   const char *prefix = line_stale() ? "~ " : "";
   char a[24], b[24];
+  s_status_warn = false;
   switch (s_line_mode) {
     case 1: // done count
       snprintf(s_status_buf, sizeof(s_status_buf), "%s%d / %d done", prefix, s_done, s_total);
@@ -188,10 +211,15 @@ static void render_status_stats(void) {
       fmt_hm(s_worked_min, a, sizeof(a));
       snprintf(s_status_buf, sizeof(s_status_buf), "%s%s worked", prefix, a);
       break;
-    case 3: // estimate remaining
+    case 3: { // estimate remaining
       fmt_hm(s_est_min, a, sizeof(a));
       snprintf(s_status_buf, sizeof(s_status_buf), "%s%s left", prefix, a);
+      time_t now = time(NULL);
+      struct tm *lt = localtime(&now);
+      int to_midnight = 24 * 60 - (lt->tm_hour * 60 + lt->tm_min);
+      if (s_est_min > to_midnight) { s_status_warn = true; }
       break;
+    }
     case 4: // habits
       if (s_hab_total > 0) {
         if (s_hab_streak >= 2 && s_hab_title[0]) {
@@ -255,6 +283,29 @@ static void status_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
+// The minute, drawn by hand so it can roll vertically on a change (old value
+// slides up and out, new value rises in from below). Clipped by its layer.
+static void time_update_proc(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  GFont f = fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD);
+  int span = b.size.h + 8;
+  graphics_context_set_text_color(ctx, GColorWhite);
+
+  int roll = 0;
+  if (s_time_roll_tick > 0) {
+    int p = s_time_roll_tick * 1000 / TIME_ROLL_TICKS;
+    if (p > 1000) { p = 1000; }
+    roll = span * p / 1000;
+    if (s_time_prev[0]) {
+      graphics_draw_text(ctx, s_time_prev, f, GRect(0, TIME_TEXT_DY - roll, b.size.w, span),
+                         GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+    }
+  }
+  int16_t y = TIME_TEXT_DY + ((s_time_roll_tick > 0) ? (span - roll) : 0);
+  graphics_draw_text(ctx, s_time_buf, f, GRect(0, y, b.size.w, span),
+                     GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+}
+
 static void anim_tick(void *data) {
   s_anim_timer = NULL;
   bool more = false;
@@ -283,6 +334,39 @@ static void anim_tick(void *data) {
     s_marquee_off += MARQUEE_STEP;
     layer_mark_dirty(s_status_layer_l);
     more = true;
+  }
+  if (s_time_roll_tick > 0) {
+    s_time_roll_tick++;
+    if (s_time_roll_tick > TIME_ROLL_TICKS) { s_time_roll_tick = 0; s_time_prev[0] = '\0'; }
+    else { more = true; }
+    layer_mark_dirty(s_time_layer_l);
+  }
+  if (s_beat_tick > 0) {
+    s_beat_tick++;
+    if (s_beat_tick > BEAT_TICKS) { s_beat_tick = 0; }
+    else { more = true; }
+    layer_mark_dirty(s_ring_layer);
+  }
+  if (s_spark_tick > 0) {
+    s_spark_tick++;
+    if (s_spark_tick > SPARK_TICKS) { s_spark_tick = 0; }
+    else { more = true; }
+    layer_mark_dirty(s_ring_layer);
+  }
+  if (s_intro_tick > 0) {
+    if (s_intro_tick == 2 && s_time_roll_tick == 0) { s_time_prev[0] = '\0'; s_time_roll_tick = 1; }
+    if (s_intro_tick == 5) { s_status_prev[0] = '\0'; s_slide_tick = 1; }
+    int dy = 12 - 12 * s_intro_tick / INTRO_TICKS;
+    GRect fr = s_date_home; fr.origin.y += dy;
+    layer_set_frame(text_layer_get_layer(s_date_layer), fr);
+    s_intro_tick++;
+    if (s_intro_tick > INTRO_TICKS) {
+      s_intro_tick = 0;
+      layer_set_frame(text_layer_get_layer(s_date_layer), s_date_home);
+    } else {
+      more = true;
+    }
+    layer_mark_dirty(s_time_layer_l);
   }
 
   if (more) { s_anim_timer = app_timer_register(ANIM_STEP_MS, anim_tick, NULL); }
@@ -333,6 +417,16 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     }
   }
 
+  // tracking: a bright dot hops around the ring, one step per second
+  if (is_tracking() && !dim) {
+    int32_t ang = (int32_t)TRIG_MAX_ANGLE * (time(NULL) % 60) / 60;
+    GPoint d = gpoint_from_polar(r, GOvalScaleModeFitCircle, ang);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_circle(ctx, d, 5);
+    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorMintGreen, GColorWhite));
+    graphics_fill_circle(ctx, d, 3);
+  }
+
   // Lower row: heart rate (left), the week sparkline (centre), tasks-left
   // (right). All muted in Quiet Time.
   int base = b.size.h - 40;
@@ -351,6 +445,7 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     for (int i = 0; i < 7; i++) {
       int hh = s_week[i] * 12 / maxv;
       if (s_week[i] > 0 && hh < 2) { hh = 2; }
+      if (s_spark_tick > 0) { hh = hh * s_spark_tick / SPARK_TICKS; }  // grow-in
       GColor bar = dim ? GColorDarkGray
           : (i == 6 ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
                     : PBL_IF_COLOR_ELSE(GColorFromRGB(60, 110, 150), GColorWhite));
@@ -363,11 +458,12 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   if (s_hr > 0) {
     GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, GColorWhite);
     int hx = 8, hy = corner_y + 6;
+    int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;  // heartbeat swell
     graphics_context_set_fill_color(ctx, hc);
-    graphics_fill_circle(ctx, GPoint(hx + 2, hy + 3), 2);
-    graphics_fill_circle(ctx, GPoint(hx + 6, hy + 3), 2);
-    graphics_fill_rect(ctx, GRect(hx, hy + 3, 8, 3), 0, GCornerNone);
-    graphics_fill_rect(ctx, GRect(hx + 2, hy + 6, 4, 2), 0, GCornerNone);
+    graphics_fill_circle(ctx, GPoint(hx + 2, hy + 3), 2 + sw);
+    graphics_fill_circle(ctx, GPoint(hx + 6, hy + 3), 2 + sw);
+    graphics_fill_rect(ctx, GRect(hx - sw, hy + 3, 8 + 2 * sw, 3 + sw), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(hx + 2 - sw, hy + 6 + sw, 4 + 2 * sw, 2), 0, GCornerNone);
     char hb[8];
     snprintf(hb, sizeof(hb), "%d", s_hr);
     graphics_context_set_text_color(ctx, hc);
@@ -417,8 +513,9 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
 
   // battery gauge, right - green / amber / red by level, cyan while charging
   BatteryChargeState bat = battery_state_service_peek();
+  bool low = bat.charge_percent <= 10 && !bat.is_charging;
   int px = b.size.w - 6 - 22, py = 5;
-  graphics_context_set_stroke_color(ctx, fg);
+  graphics_context_set_stroke_color(ctx, low ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite) : fg);
   graphics_draw_rect(ctx, GRect(px, py, 20, 9));
   graphics_draw_line(ctx, GPoint(px + 20, py + 2), GPoint(px + 20, py + 6));
   GColor bc = bat.is_charging ? PBL_IF_COLOR_ELSE(GColorCyan, GColorWhite)
@@ -427,6 +524,10 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
             : PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
   graphics_context_set_fill_color(ctx, bc);
   graphics_fill_rect(ctx, GRect(px + 2, py + 2, bat.charge_percent * 16 / 100, 5), 0, GCornerNone);
+  if (low) {  // an alert pip left of the gauge
+    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, GColorWhite));
+    graphics_fill_rect(ctx, GRect(px - 7, py, 3, 9), 0, GCornerNone);
+  }
 
   // phone-disconnected mark, right of the date row area
   if (!s_bt) {
@@ -439,11 +540,20 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
 
 // ---------- time ----------
 static void tick_handler(struct tm *t, TimeUnits units) {
-  strftime(s_time_buf, sizeof(s_time_buf), clock_is_24h_style() ? "%H:%M" : "%I:%M", t);
-  if (!clock_is_24h_style() && s_time_buf[0] == '0') {
-    memmove(s_time_buf, s_time_buf + 1, strlen(s_time_buf));
+  char nt[8];
+  strftime(nt, sizeof(nt), clock_is_24h_style() ? "%H:%M" : "%I:%M", t);
+  if (!clock_is_24h_style() && nt[0] == '0') { memmove(nt, nt + 1, strlen(nt)); }
+  if (strncmp(nt, s_time_buf, sizeof(s_time_buf)) != 0) {
+    if (s_time_buf[0] && s_intro_tick == 0) {   // roll - but not on the first draw
+      strncpy(s_time_prev, s_time_buf, sizeof(s_time_prev));
+      s_time_prev[sizeof(s_time_prev) - 1] = '\0';
+      s_time_roll_tick = 1;
+      kick_anim();
+    }
+    strncpy(s_time_buf, nt, sizeof(s_time_buf));
+    s_time_buf[sizeof(s_time_buf) - 1] = '\0';
+    if (s_time_layer_l) { layer_mark_dirty(s_time_layer_l); }
   }
-  text_layer_set_text(s_time_layer, s_time_buf);
   strftime(s_date_buf, sizeof(s_date_buf), "%a %d %b", t);
   text_layer_set_text(s_date_layer, s_date_buf);
 
@@ -452,12 +562,15 @@ static void tick_handler(struct tm *t, TimeUnits units) {
     s_steps = (int)health_service_sum_today(HealthMetricStepCount);
     // peek returns 0 when there's no recent reading / no sensor.
     HealthValue bpm = health_service_peek_current_value(HealthMetricHeartRateBPM);
-    s_hr = bpm > 0 ? (int)bpm : 0;
+    int newhr = bpm > 0 ? (int)bpm : 0;
+    if (newhr > 0 && newhr != s_hr) { s_beat_tick = 1; kick_anim(); }  // thump
+    s_hr = newhr;
   }
 #endif
 
   if (is_tracking()) {
-    render_status(); // ticks the ▶ timer every second
+    render_status();                 // ticks the ▶ timer every second
+    layer_mark_dirty(s_ring_layer);  // steps the tracking dot round the ring
   }
   layer_mark_dirty(s_top_layer);
 }
@@ -504,7 +617,13 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
     strncpy(s_hab_title, t->value->cstring, sizeof(s_hab_title));
     s_hab_title[sizeof(s_hab_title) - 1] = '\0';
   }
-  if ((t = dict_find(iter, KEY_WEEK_CSV))) { parse_week_csv(t->value->cstring); }
+  if ((t = dict_find(iter, KEY_WEEK_CSV))) {
+    int before = 0, after = 0;
+    for (int i = 0; i < 7; i++) { before += s_week[i] * (i + 1); }
+    parse_week_csv(t->value->cstring);
+    for (int i = 0; i < 7; i++) { after += s_week[i] * (i + 1); }
+    if (before != after) { s_spark_tick = 1; }  // grow the bars in
+  }
 
   {
     Tuple *tt = dict_find(iter, KEY_TRACK_TITLE);
@@ -532,7 +651,7 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   bool newly_complete = new_target >= 1000 && s_ring_target < 1000;
   s_ring_target = new_target;
   if (newly_complete) { s_pulse_tick = 1; }
-  if (s_ring_shown != s_ring_target || s_pulse_tick > 0) { kick_anim(); }
+  if (s_ring_shown != s_ring_target || s_pulse_tick > 0 || s_spark_tick > 0) { kick_anim(); }
 
   render_status();
   layer_mark_dirty(s_ring_layer);
@@ -564,21 +683,27 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_top_layer, top_update_proc);
   layer_add_child(root, s_top_layer);
 
-  s_time_layer = text_layer_create(GRect(0, cy - 42, b.size.w, 46));
-  text_layer_set_background_color(s_time_layer, GColorClear);
-  text_layer_set_text_color(s_time_layer, GColorWhite);
-  text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD));
-  text_layer_set_text_alignment(s_time_layer, GTextAlignmentCenter);
-  layer_add_child(root, text_layer_get_layer(s_time_layer));
+  s_time_layer_l = layer_create(GRect(0, cy - 42, b.size.w, 46));
+  layer_set_update_proc(s_time_layer_l, time_update_proc);
+  layer_set_clips(s_time_layer_l, true);
+  layer_add_child(root, s_time_layer_l);
 
-  s_date_layer = text_layer_create(GRect(0, cy + 4, b.size.w, 22));
+  s_date_home = GRect(0, cy + 4, b.size.w, 22);
+  s_date_layer = text_layer_create(s_date_home);
   text_layer_set_background_color(s_date_layer, GColorClear);
   text_layer_set_text_color(s_date_layer, PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(root, text_layer_get_layer(s_date_layer));
 
-  s_status_layer_l = layer_create(GRect(0, cy + 30, b.size.w, 24));
+  // Keep the status line inside the ring: its band sits below centre, so
+  // clip it to the ring's inner width there (plus a little for the stroke).
+  int rr = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 3;
+  int half = isqrt_i(rr * rr - 54 * 54);
+  int sx = b.size.w / 2 - half + 6;
+  if (sx < 4) { sx = 4; }
+  s_status_w = b.size.w - 2 * sx;
+  s_status_layer_l = layer_create(GRect(sx, cy + 30, s_status_w, 24));
   layer_set_update_proc(s_status_layer_l, status_update_proc);
   layer_set_clips(s_status_layer_l, true);
   layer_add_child(root, s_status_layer_l);
@@ -587,7 +712,9 @@ static void window_load(Window *window) {
   time_t now = time(NULL);
   tick_handler(localtime(&now), MINUTE_UNIT);
   render_status();
-  if (s_ring_target > 0) { kick_anim(); } // startup sweep
+  s_intro_tick = 1;    // launch stagger: ring sweep -> time roll-in -> line slide
+  s_spark_tick = 1;    // ... with the sparkline growing up alongside
+  kick_anim();
 }
 
 static void window_unload(Window *window) {
@@ -595,7 +722,7 @@ static void window_unload(Window *window) {
   layer_destroy(s_ring_layer);
   layer_destroy(s_top_layer);
   layer_destroy(s_status_layer_l);
-  text_layer_destroy(s_time_layer);
+  layer_destroy(s_time_layer_l);
   text_layer_destroy(s_date_layer);
 }
 
