@@ -61,6 +61,7 @@ static time_t s_last_ok = 0;
 
 static int s_line_mode = 0;
 static int s_steps = 0;
+static int s_hr = 0;         // last heart-rate reading, BPM (0 = none / no sensor)
 static bool s_bt = true;
 
 static char s_time_buf[8];
@@ -78,6 +79,7 @@ static GColor s_status_color;
 #define MARQUEE_BUDGET 240     // anim ticks a fresh line marquees before it parks (~8s)
 #define TIME_ROLL_TICKS 6      // minute vertical-roll length
 #define SPARK_TICKS 8          // sparkline grow-in length
+#define BEAT_TICKS 5           // heart-rate thump length
 #define INTRO_TICKS 12         // launch stagger length
 #define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
 static AppTimer *s_anim_timer = NULL;
@@ -92,6 +94,7 @@ static char s_marquee_last[96] = "";  // the line the current budget was granted
 static int s_time_roll_tick = 0;    // 0 = idle
 static char s_time_prev[8] = "";
 static int s_spark_tick = 0;         // 0 = idle (bars at full height)
+static int s_beat_tick = 0;          // 0 = idle (heart-rate thump)
 static int s_intro_tick = 0;         // 0 = idle
 static bool s_status_warn = false;   // est-remaining overshoots the day -> red line
 static int s_status_w = 148;         // status layer width (set to fit inside the ring)
@@ -370,6 +373,12 @@ static void anim_tick(void *data) {
     else { more = true; }
     layer_mark_dirty(s_ring_layer);
   }
+  if (s_beat_tick > 0) {
+    s_beat_tick++;
+    if (s_beat_tick > BEAT_TICKS) { s_beat_tick = 0; }
+    else { more = true; }
+    if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
   if (s_intro_tick > 0) {
     if (s_intro_tick == 2 && s_time_roll_tick == 0) { s_time_prev[0] = '\0'; s_time_roll_tick = 1; }
     if (s_intro_tick == 5) { s_status_prev[0] = '\0'; s_slide_tick = 1; }
@@ -470,13 +479,31 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
-// Bottom strip: tasks-left today. Its own layer, well clear of the status
-// line, so a long marquee never drags it into a redraw.
+// Bottom strip: heart rate (left) + tasks-left (right). Its own layer, well
+// clear of the status line, so a long marquee never drags it into a redraw.
 static void lower_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   bool dim = quiet_time_is_active();
   GFont f14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  int lx = PBL_IF_RECT_ELSE(8, 26);
   int rx = PBL_IF_RECT_ELSE(6, 26);
+
+  // heart rate, left: a tiny heart + BPM (thumps on a fresh reading)
+  if (s_hr > 0) {
+    GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, GColorWhite);
+    int hy = 5;
+    int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;
+    graphics_context_set_fill_color(ctx, hc);
+    graphics_fill_circle(ctx, GPoint(lx + 2, hy + 3), 2 + sw);
+    graphics_fill_circle(ctx, GPoint(lx + 6, hy + 3), 2 + sw);
+    graphics_fill_rect(ctx, GRect(lx - sw, hy + 3, 8 + 2 * sw, 3 + sw), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(lx + 2 - sw, hy + 6 + sw, 4 + 2 * sw, 2), 0, GCornerNone);
+    char hb[8];
+    snprintf(hb, sizeof(hb), "%d", s_hr);
+    graphics_context_set_text_color(ctx, hc);
+    graphics_draw_text(ctx, hb, f14, GRect(lx + 12, 0, 40, 18),
+                       GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  }
 
   if (s_total > 0) {
     int left = s_total - s_done;
@@ -566,6 +593,13 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #if defined(PBL_HEALTH)
   if ((units & MINUTE_UNIT) || s_steps == 0) {
     s_steps = (int)health_service_sum_today(HealthMetricStepCount);
+    HealthValue bpm = health_service_peek_current_value(HealthMetricHeartRateBPM);
+    int newhr = bpm > 0 ? (int)bpm : 0;   // 0 when no recent reading / no sensor
+    if (newhr != s_hr) {
+      if (newhr > 0) { s_beat_tick = 1; kick_anim(); }  // thump on a fresh reading
+      s_hr = newhr;
+      if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+    }
   }
 #endif
 
@@ -796,9 +830,16 @@ static void init(void) {
 
   app_message_register_inbox_received(inbox_received);
   app_message_open(512, 64);
+
+#if defined(PBL_HEALTH)
+  health_service_set_heart_rate_sample_period(300);  // a fresh HR reading ~every 5 min
+#endif
 }
 
 static void deinit(void) {
+#if defined(PBL_HEALTH)
+  health_service_set_heart_rate_sample_period(0);
+#endif
   save_persisted();
   connection_service_unsubscribe();
   battery_state_service_unsubscribe();
