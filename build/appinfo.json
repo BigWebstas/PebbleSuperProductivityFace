@@ -1,0 +1,65 @@
+{
+    "displayName": "Super Productivity Face",
+    "uuid": "7ec735d1-ad0c-402d-b6e8-127cbcf42417",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+        "aplite",
+        "basalt",
+        "chalk",
+        "diorite",
+        "emery"
+    ],
+    "watchapp": {
+        "watchface": true
+    },
+    "projectType": "native",
+    "capabilities": [
+        "health",
+        "configurable"
+    ],
+    "resources": {
+        "media": []
+    },
+    "messageKeys": {
+        "MSG_TYPE": 10000,
+        "FACE_STATUS": 10001,
+        "FACE_DONE_TODAY": 10002,
+        "FACE_TOTAL_TODAY": 10003,
+        "FACE_WORKED_MIN": 10004,
+        "FACE_EST_REMAIN_MIN": 10005,
+        "FACE_NEXT_MIN": 10006,
+        "FACE_NEXT_TITLE": 10007,
+        "FACE_HABITS_DONE": 10008,
+        "FACE_HABITS_TOTAL": 10009,
+        "FACE_HABIT_STREAK": 10010,
+        "FACE_HABIT_TITLE": 10011,
+        "FACE_WEEK_CSV": 10012,
+        "FACE_TRACKING_TITLE": 10013,
+        "FACE_TRACKING_ELAPSED_S": 10014,
+        "FACE_TRACKING_OVER_S": 10015
+    },
+    "name": "pebble-super-productivity-face",
+    "shortName": "Super Productivity Face",
+    "longName": "Super Productivity Face",
+    "versionLabel": "0.1.0",
+    "companyName": "BW",
+    "appKeys": {
+        "MSG_TYPE": 10000,
+        "FACE_STATUS": 10001,
+        "FACE_DONE_TODAY": 10002,
+        "FACE_TOTAL_TODAY": 10003,
+        "FACE_WORKED_MIN": 10004,
+        "FACE_EST_REMAIN_MIN": 10005,
+        "FACE_NEXT_MIN": 10006,
+        "FACE_NEXT_TITLE": 10007,
+        "FACE_HABITS_DONE": 10008,
+        "FACE_HABITS_TOTAL": 10009,
+        "FACE_HABIT_STREAK": 10010,
+        "FACE_HABIT_TITLE": 10011,
+        "FACE_WEEK_CSV": 10012,
+        "FACE_TRACKING_TITLE": 10013,
+        "FACE_TRACKING_ELAPSED_S": 10014,
+        "FACE_TRACKING_OVER_S": 10015
+    }
+}
