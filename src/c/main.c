@@ -26,11 +26,24 @@
 #define KEY_TRACK_ELAPSED_S  MESSAGE_KEY_FACE_TRACKING_ELAPSED_S
 #define KEY_TRACK_OVER_S     MESSAGE_KEY_FACE_TRACKING_OVER_S  // session secs at which it passes its estimate, -1 = n/a
 
+#define KEY_SHOW_MASK        MESSAGE_KEY_FACE_SHOW_MASK
+
 #define MSG_REFRESH_REQUEST 1
+
+// which face elements are drawn - a bitmask set from the config page. All on
+// by default; the phone sends a fresh mask on launch and whenever it changes.
+#define SHOW_STEPS   (1 << 0)
+#define SHOW_BATTERY (1 << 1)
+#define SHOW_SPARK   (1 << 2)
+#define SHOW_HR      (1 << 3)
+#define SHOW_HABITS  (1 << 4)
+#define SHOW_TASKS   (1 << 5)
+#define SHOW_ALL     0x3F
 
 // persist keys
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
-       PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK, PK_LAST_OK };
+       PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK, PK_LAST_OK,
+       PK_SHOW };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
@@ -63,6 +76,9 @@ static int s_line_mode = 0;
 static int s_steps = 0;
 static int s_hr = 0;         // last heart-rate reading, BPM (0 = none / no sensor)
 static bool s_bt = true;
+static int s_show = SHOW_ALL;   // which elements to draw (config bitmask)
+static int s_moon_cy = 0;       // Quiet Time moon centre, screen y (set in window_load)
+static bool s_qt_prev = false;  // last-seen Quiet Time state, to catch transitions
 
 static char s_time_buf[8];
 static char s_date_buf[24];
@@ -530,8 +546,8 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   }
 
   // week sparkline, centred, just below the digits
-  int base = b.size.h - 40;
-  {
+  if (s_show & SHOW_SPARK) {
+    int base = b.size.h - 40;
     int maxv = 1;
     for (int i = 0; i < 7; i++) { if (s_week[i] > maxv) { maxv = s_week[i]; } }
     int bw = 6, gap = 3, total_w = 7 * bw + 6 * gap;
@@ -547,6 +563,16 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
       graphics_fill_rect(ctx, GRect(x0 + i * (bw + gap), base - hh, bw, hh), 0, GCornerNone);
     }
   }
+
+  // Quiet Time: a crescent moon centred in the gap between the ring and the
+  // time. Full disc, then a background disc carves the crescent.
+  if (quiet_time_is_active() && s_moon_cy > 0) {
+    int mx = b.size.w / 2, my = s_moon_cy, mr = 9;
+    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorPastelYellow, GColorWhite));
+    graphics_fill_circle(ctx, GPoint(mx, my), mr);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_circle(ctx, GPoint(mx + 5, my - 2), mr);
+  }
 }
 
 // Bottom strip: heart rate (left), habits check + done/total (centre), tasks-left (right).
@@ -560,7 +586,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
   int rx = PBL_IF_RECT_ELSE(6, 26);
 
   // heart rate, left: a tiny heart + BPM (thumps on a fresh reading)
-  if (s_hr > 0) {
+  if ((s_show & SHOW_HR) && s_hr > 0) {
     GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, GColorWhite);
     int hy = 5;
     int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;
@@ -579,7 +605,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
   // habits, centre: a small check + today's done / total. The text goes green
   // once they're all done. The tap-cycle still has the fuller
   // "N/M habits · streak" line.
-  if (s_hab_total > 0) {
+  if ((s_show & SHOW_HABITS) && s_hab_total > 0) {
     bool all = s_hab_done >= s_hab_total;
     GColor hcol = dim ? GColorDarkGray
         : (all ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
@@ -601,7 +627,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
   }
 
-  if (s_total > 0) {
+  if ((s_show & SHOW_TASKS) && s_total > 0) {
     int left = s_total - s_done;
     char tb[16];
     if (left <= 0) { snprintf(tb, sizeof(tb), "all done"); }
@@ -634,43 +660,38 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
 
   // steps, left
 #if defined(PBL_HEALTH)
-  if (s_steps > 0) {
+  if ((s_show & SHOW_STEPS) && s_steps > 0) {
     draw_comma_int(ctx, fonts_get_system_font(FONT_KEY_GOTHIC_14),
                    GRect(6, 0, b.size.w / 2, 16), s_steps, GTextAlignmentLeft);
   }
 #endif
 
   // battery gauge, right - green / amber / red by level, cyan while charging
-  BatteryChargeState bat = battery_state_service_peek();
-  bool low = bat.charge_percent <= 10 && !bat.is_charging;
-  int px = b.size.w - 6 - 22, py = 5;
-  graphics_context_set_stroke_color(ctx, low ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite) : fg);
-  graphics_draw_rect(ctx, GRect(px, py, 20, 9));
-  graphics_draw_line(ctx, GPoint(px + 20, py + 2), GPoint(px + 20, py + 6));
-  GColor bc = bat.is_charging ? PBL_IF_COLOR_ELSE(GColorCyan, GColorWhite)
-            : bat.charge_percent <= 10 ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite)
-            : bat.charge_percent <= 25 ? PBL_IF_COLOR_ELSE(GColorChromeYellow, GColorWhite)
-            : PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
-  graphics_context_set_fill_color(ctx, bc);
-  graphics_fill_rect(ctx, GRect(px + 2, py + 2, bat.charge_percent * 16 / 100, 5), 0, GCornerNone);
-  if (low) {  // an alert pip left of the gauge
-    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, GColorWhite));
-    graphics_fill_rect(ctx, GRect(px - 7, py, 3, 9), 0, GCornerNone);
+  if (s_show & SHOW_BATTERY) {
+    BatteryChargeState bat = battery_state_service_peek();
+    bool low = bat.charge_percent <= 10 && !bat.is_charging;
+    int px = b.size.w - 6 - 22, py = 5;
+    graphics_context_set_stroke_color(ctx, low ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite) : fg);
+    graphics_draw_rect(ctx, GRect(px, py, 20, 9));
+    graphics_draw_line(ctx, GPoint(px + 20, py + 2), GPoint(px + 20, py + 6));
+    GColor bc = bat.is_charging ? PBL_IF_COLOR_ELSE(GColorCyan, GColorWhite)
+              : bat.charge_percent <= 10 ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite)
+              : bat.charge_percent <= 25 ? PBL_IF_COLOR_ELSE(GColorChromeYellow, GColorWhite)
+              : PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
+    graphics_context_set_fill_color(ctx, bc);
+    graphics_fill_rect(ctx, GRect(px + 2, py + 2, bat.charge_percent * 16 / 100, 5), 0, GCornerNone);
+    if (low) {  // an alert pip left of the gauge
+      graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, GColorWhite));
+      graphics_fill_rect(ctx, GRect(px - 7, py, 3, 9), 0, GCornerNone);
+    }
   }
 
-  // phone-disconnected mark, right of the date row area
+  // phone-disconnected mark, centred in the top strip
   if (!s_bt) {
     graphics_context_set_text_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, GColorWhite));
     graphics_draw_text(ctx, "no phone", fonts_get_system_font(FONT_KEY_GOTHIC_14),
                        GRect(b.size.w / 2, 0, b.size.w / 2 - 30, 16),
                        GTextOverflowModeFill, GTextAlignmentRight, NULL);
-  } else if (quiet_time_is_active()) {
-    // a little crescent moon, centred, while Quiet Time is on
-    int mx = b.size.w / 2, my = 8;
-    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorPastelYellow, GColorWhite));
-    graphics_fill_circle(ctx, GPoint(mx, my), 5);
-    graphics_context_set_fill_color(ctx, GColorBlack);
-    graphics_fill_circle(ctx, GPoint(mx + 3, my - 1), 5);
   }
 
   // brief green underline when the phone has just reconnected
@@ -722,6 +743,8 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   if (units & MINUTE_UNIT) {
     layer_mark_dirty(s_top_layer);
     if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+    bool qt = quiet_time_is_active();   // moon + dim live in the ring layer
+    if (qt != s_qt_prev) { s_qt_prev = qt; layer_mark_dirty(s_ring_layer); }
   }
 }
 
@@ -749,6 +772,12 @@ static void parse_week_csv(const char *csv) {
 static void inbox_received(DictionaryIterator *iter, void *ctx) {
   Tuple *t;
 
+  if ((t = dict_find(iter, KEY_SHOW_MASK))) {
+    s_show = t->value->int32;
+    layer_mark_dirty(s_ring_layer);
+    layer_mark_dirty(s_top_layer);
+    if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
   if ((t = dict_find(iter, KEY_STATUS))) { s_status = t->value->int32; }
   if ((t = dict_find(iter, KEY_DONE)))   { s_done = t->value->int32; }
   if ((t = dict_find(iter, KEY_TOTAL)))  { s_total = t->value->int32; }
@@ -829,6 +858,8 @@ static void window_load(Window *window) {
   GRect b = layer_get_bounds(root);
   window_set_background_color(window, GColorBlack);
   int16_t cy = b.size.h / 2;
+  s_moon_cy = cy / 2 - 12;         // Quiet Time moon: in the gap between ring top and time
+  s_qt_prev = quiet_time_is_active();
 
   s_ring_layer = layer_create(b);
   layer_set_update_proc(s_ring_layer, ring_update_proc);
@@ -889,6 +920,7 @@ static void window_unload(Window *window) {
 }
 
 static void load_persisted(void) {
+  s_show = persist_exists(PK_SHOW) ? persist_read_int(PK_SHOW) : SHOW_ALL;
   if (!persist_exists(PK_TOTAL)) { return; }
   s_done = persist_read_int(PK_DONE);
   s_total = persist_read_int(PK_TOTAL);
@@ -927,6 +959,7 @@ static void save_persisted(void) {
            s_week[0], s_week[1], s_week[2], s_week[3], s_week[4], s_week[5], s_week[6]);
   persist_write_string(PK_WEEK, csv);
   persist_write_int(PK_LAST_OK, (int)s_last_ok);
+  persist_write_int(PK_SHOW, s_show);
 }
 
 static void init(void) {

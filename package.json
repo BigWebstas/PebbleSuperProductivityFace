@@ -1,6 +1,6 @@
 {
   "name": "pebble-super-productivity-face",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Companion watchface for the Super Productivity Pebble watchapp - time plus today-progress pulled from SuperSync.",
   "author": "BW",
   "private": true,
@@ -47,7 +47,8 @@
       "FACE_WEEK_CSV",
       "FACE_TRACKING_TITLE",
       "FACE_TRACKING_ELAPSED_S",
-      "FACE_TRACKING_OVER_S"
+      "FACE_TRACKING_OVER_S",
+      "FACE_SHOW_MASK"
     ]
   }
 }

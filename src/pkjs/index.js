@@ -17,6 +17,17 @@ var STATUS_SYNCING = 1;
 var STATUS_NOT_PAIRED = 2;
 var STATUS_ERROR = 3;
 
+// Face element toggles - sent to the watch as one bitmask. Must match the
+// SHOW_* defines in src/c/main.c. Everything is on unless the config turns it off.
+var SHOW = { steps: 1, battery: 2, spark: 4, hr: 8, habits: 16, tasks: 32 };
+var SHOW_ALL = 63;
+function showMask(config) {
+  var s = (config && config.show) || {};
+  var m = 0;
+  Object.keys(SHOW).forEach(function (k) { if (s[k] !== false) { m |= SHOW[k]; } });
+  return m;
+}
+
 // Re-pull at most this often on the background timer; a tap forces one anyway.
 var POLL_MS = 20 * 60 * 1000;
 var lastPollAt = 0;
@@ -155,6 +166,7 @@ function pushFaceData(state) {
     FACE_HABIT_STREAK: topStreak,
     FACE_HABIT_TITLE: topTitle.slice(0, 20),
     FACE_WEEK_CSV: weekCsv,
+    FACE_SHOW_MASK: showMask(loadConfig()),
   });
 }
 
@@ -169,6 +181,7 @@ function doSync() {
       FACE_NEXT_MIN: -1, FACE_NEXT_TITLE: '', FACE_HABITS_DONE: 0, FACE_HABITS_TOTAL: 0,
       FACE_HABIT_STREAK: 0, FACE_HABIT_TITLE: '', FACE_WEEK_CSV: '0,0,0,0,0,0,0',
       FACE_TRACKING_TITLE: '', FACE_TRACKING_ELAPSED_S: 0,
+      FACE_SHOW_MASK: showMask(config),
     });
     return Promise.resolve();
   }
@@ -310,6 +323,11 @@ function configHtml(config) {
   var pollOpts = [10, 15, 20, 30, 60].map(function (v) {
     return '<option value="' + v + '"' + (v === pollMin ? ' selected' : '') + '>every ' + v + ' min</option>';
   }).join('');
+  var shown = (config && config.show) || {};
+  var ck = function (k, lbl) {
+    return '<div class="row"><input id="s_' + k + '" type="checkbox"' +
+      (shown[k] === false ? '' : ' checked') + '><label for="s_' + k + '">' + lbl + '</label></div>';
+  };
   var html = '<!doctype html><html><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<style>' +
@@ -338,17 +356,23 @@ function configHtml(config) {
     '<div class="row"><input id="showTracking" type="checkbox"' + (showTracking ? ' checked' : '') + '>' +
     '<label for="showTracking">Show the live-tracked task</label></div>' +
     '<p class="hint">Holds a connection open to show what you\'re tracking right now, with a running timer. Uses noticeably more battery.</p>' +
+    '<label>Show on the face</label>' +
+    ck('steps', 'Steps') + ck('battery', 'Battery') + ck('spark', 'Week sparkline') +
+    ck('hr', 'Heart rate') + ck('habits', 'Habits') + ck('tasks', 'Tasks remaining') +
     '<button id="save">Save</button>' +
     '<button id="cancel" class="secondary">Cancel</button>' +
     '<script>' +
     'function close(d){location.href="pebblejs://close#"+encodeURIComponent(JSON.stringify(d))}' +
+    'function g(i){return document.getElementById(i)}' +
     'document.getElementById("save").onclick=function(){close({' +
-    'baseUrl:document.getElementById("baseUrl").value.replace(/\\/+$/,""),' +
-    'email:document.getElementById("email").value.trim(),' +
-    'password:document.getElementById("password").value,' +
-    'jwt:document.getElementById("jwt").value.trim(),' +
-    'pollMin:parseInt(document.getElementById("pollMin").value,10)||20,' +
-    'showTracking:document.getElementById("showTracking").checked})};' +
+    'baseUrl:g("baseUrl").value.replace(/\\/+$/,""),' +
+    'email:g("email").value.trim(),' +
+    'password:g("password").value,' +
+    'jwt:g("jwt").value.trim(),' +
+    'pollMin:parseInt(g("pollMin").value,10)||20,' +
+    'showTracking:g("showTracking").checked,' +
+    'show:{steps:g("s_steps").checked,battery:g("s_battery").checked,spark:g("s_spark").checked,' +
+    'hr:g("s_hr").checked,habits:g("s_habits").checked,tasks:g("s_tasks").checked}})};' +
     'document.getElementById("cancel").onclick=function(){close({cancelled:true})};' +
     '</script></body></html>';
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
@@ -371,6 +395,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   if (r.password) { localStorage.setItem('spf_password', r.password); credsChanged = true; }
   config.pollMin = r.pollMin || 20;
   config.showTracking = !!r.showTracking;
+  if (r.show) { config.show = r.show; }
   saveConfig(config);
   POLL_MS = config.pollMin * 60 * 1000;
   if (credsChanged) {
@@ -379,6 +404,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     localStorage.removeItem('spf_last_seq');
     localStorage.removeItem('spf_kdf_keys');
   }
+  sendToFace({ MSG_TYPE: 0, FACE_SHOW_MASK: showMask(config) });  // apply toggles now
   doSync();
   applyPresence(config);
 });

@@ -25,6 +25,9 @@ face runs its own trimmed SuperSync client.
     updating each minute (the face ticks per minute, never per second).
 - A `~` prefix + grey text when the last sync is over an hour old.
 - **Quiet Time**: the line goes grey, the ring and sparkline dim.
+- Steps, battery, the sparkline, heart rate, habits and tasks-left are each an
+  on/off toggle in the settings (all on by default). The time, date, ring and
+  bottom line always show.
 
 ### Colour & motion
 
@@ -38,9 +41,9 @@ face runs its own trimmed SuperSync client.
 - On launch the pieces stagger in: the ring sweeps and the sparkline grows,
   then the minute rolls in, then the bottom line slides up.
 - The minute rolls vertically on each change - only the digits that changed.
-- A crescent moon shows in the top strip during Quiet Time; the strip flashes
-  a green underline when the phone reconnects. A gold check sits below the
-  sparkline once every task is done.
+- A crescent moon shows in the gap between the ring and the time during Quiet
+  Time; the top strip flashes a green underline when the phone reconnects. A
+  gold check sits below the sparkline once every task is done.
 - The heart icon gives a small thump each time a fresh reading lands.
 - The bottom line cross-slides on a change and, for a long task name, scrolls
   once inside the ring's width then parks at the start.
@@ -76,7 +79,8 @@ are quick.
 
 Its own settings page (4 fields: server URL, email, encryption password,
 access token). Paste the same values you used for the watchapp - the face
-can't read them from the app.
+can't read them from the app. The page also has the refresh interval, the
+live-tracked-task toggle, and the six "show on the face" toggles.
 
 Shared libs copied in: `argon2id`, `aes-gcm`, `blake2b`, `sha256`, `base64`,
 `supersync-client`, `task-store`, `presence-client`. Keep in sync by hand.
