@@ -11,9 +11,7 @@ face runs its own trimmed SuperSync client.
 - **Steps** (top-left) and a **battery** gauge (top-right); a "no phone" mark
   when Bluetooth drops.
 - A **week sparkline** - minutes worked each of the last 7 days.
-- **Heart rate** (bottom-left, on watches with the sensor) and **tasks left
-  today** (bottom-right). On rectangular screens these sit in the bottom
-  corners, clear of the ring.
+- **Tasks left today** in the bottom-right corner.
 - A **bottom line** that a wrist-tap cycles through:
   - the next timed task (`→ 3:15  Standup`)
   - `N / M done`
@@ -34,9 +32,8 @@ face runs its own trimmed SuperSync client.
 - On launch the pieces stagger in: the ring sweeps and the sparkline grows,
   then the minute rolls in, then the bottom line slides up.
 - The minute rolls vertically on each change.
-- The heart icon gives a small thump each time a new reading lands.
-- The bottom line cross-slides on a change and marquees a long task name -
-  scrolling only within the ring, not the full screen width.
+- The bottom line cross-slides on a change and, for a long task name, scrolls
+  once inside the ring's width then parks at the start.
 - Battery gauge is green / amber / red by level, cyan while charging; below
   10% the outline turns red and an alert pip appears beside it.
 - `Xh left` turns red when the estimate overshoots the end of the day.
@@ -75,6 +72,9 @@ Shared libs copied in: `argon2id`, `aes-gcm`, `blake2b`, `sha256`, `base64`,
 
 ## Not yet
 
+- On-watch heart rate. It was added, then pulled while chasing a crash that
+  turned out to be `gpoint_from_polar` (it faults on emery - the tracking dot
+  now uses hand-rolled `sin_lookup`/`cos_lookup`). HR can come back.
 - Config "import from the watchapp" (per-app storage blocks it).
 - Theme-aware colours.
 - The live-timer's elapsed can jump if the presence session re-emits with a

@@ -41,6 +41,8 @@ static Layer *s_time_layer_l;     // custom-drawn: vertical roll on the minute
 static TextLayer *s_date_layer;
 static Layer *s_status_layer_l;   // custom-drawn: colour + slide + marquee
 static Layer *s_top_layer;        // steps / battery / bt
+static Layer *s_lower_layer = NULL; // bottom strip: tasks-left, its own layer so the
+                                    // status marquee's redraws never reach it
 static GRect s_date_home;         // date layer's resting frame (the intro slides up to it)
 
 static int s_status = 2;
@@ -59,7 +61,6 @@ static time_t s_last_ok = 0;
 
 static int s_line_mode = 0;
 static int s_steps = 0;
-static int s_hr = 0;         // last heart-rate reading, BPM (0 = none / no sensor)
 static bool s_bt = true;
 
 static char s_time_buf[8];
@@ -74,8 +75,8 @@ static GColor s_status_color;
 #define PULSE_TICKS 16         // completion flash length
 #define SLIDE_TICKS 7          // line cross-slide length
 #define MARQUEE_STEP 2
+#define MARQUEE_BUDGET 240     // anim ticks a fresh line marquees before it parks (~8s)
 #define TIME_ROLL_TICKS 6      // minute vertical-roll length
-#define BEAT_TICKS 5           // heart-rate thump length
 #define SPARK_TICKS 8          // sparkline grow-in length
 #define INTRO_TICKS 12         // launch stagger length
 #define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
@@ -86,9 +87,10 @@ static int s_pulse_tick = 0;   // 0 = idle
 static int s_slide_tick = 0;   // 0 = idle
 static int s_marquee_off = 0;  // px, status-line scroll
 static bool s_marquee_on = false;
+static int s_marquee_budget = 0;      // anim ticks left before the marquee parks
+static char s_marquee_last[96] = "";  // the line the current budget was granted for
 static int s_time_roll_tick = 0;    // 0 = idle
 static char s_time_prev[8] = "";
-static int s_beat_tick = 0;          // 0 = idle
 static int s_spark_tick = 0;         // 0 = idle (bars at full height)
 static int s_intro_tick = 0;         // 0 = idle
 static bool s_status_warn = false;   // est-remaining overshoots the day -> red line
@@ -186,21 +188,31 @@ static void render_status(void) {
   if (qt) { s_status_color = GColorDarkGray; }
   s_status_buf[sizeof(s_status_buf) - 1] = '\0';
 
-  // marquee only for an overflowing line (long task names)
+  // "just the timer ticking on the same task" - not a real content change
+  bool tick_only = is_tracking() && s_track_title[0] &&
+                   strstr(s_status_buf, s_track_title) && strstr(prevbuf, s_track_title);
+
+  // marquee a line that overflows the (ring-clipped) width - but only for a
+  // bounded burst, then park it at the start, so the redraw loop stops.
   GSize sz = graphics_text_layout_get_content_size(
       s_status_buf, status_font(), GRect(0, 0, 1000, 24), GTextOverflowModeFill, GTextAlignmentLeft);
   s_marquee_on = sz.w > s_status_w;
-  if (!s_marquee_on) { s_marquee_off = 0; }
+  if (!s_marquee_on) {
+    s_marquee_off = 0; s_marquee_budget = 0; s_marquee_last[0] = '\0';
+  } else if (!tick_only && strncmp(s_status_buf, s_marquee_last, sizeof(s_marquee_last)) != 0) {
+    strncpy(s_marquee_last, s_status_buf, sizeof(s_marquee_last));
+    s_marquee_last[sizeof(s_marquee_last) - 1] = '\0';
+    s_marquee_budget = MARQUEE_BUDGET;
+    s_marquee_off = 0;
+  }
 
   // slide only on a real content change - not the per-second timer of the same task
-  bool tick_only = is_tracking() && strstr(s_status_buf, s_track_title) &&
-                   strstr(prevbuf, s_track_title);
   if (prevbuf[0] && !tick_only && strncmp(prevbuf, s_status_buf, sizeof(prevbuf)) != 0) {
     strncpy(s_status_prev, prevbuf, sizeof(s_status_prev));
     s_slide_tick = 1;
     kick_anim();
   }
-  if (s_marquee_on) { kick_anim(); }
+  if (s_marquee_on && s_marquee_budget > 0) { kick_anim(); }
   if (s_status_layer_l) { layer_mark_dirty(s_status_layer_l); }
 }
 
@@ -336,21 +348,21 @@ static void anim_tick(void *data) {
     layer_mark_dirty(s_status_layer_l);
   }
   if (s_marquee_on && s_slide_tick == 0) {
-    s_marquee_off += MARQUEE_STEP;
-    layer_mark_dirty(s_status_layer_l);
-    more = true;
+    if (s_marquee_budget > 0) {
+      s_marquee_budget--;
+      s_marquee_off += MARQUEE_STEP;
+      layer_mark_dirty(s_status_layer_l);
+      more = true;
+    } else if (s_marquee_off != 0) {
+      s_marquee_off = 0;                       // budget spent: snap back, then rest
+      layer_mark_dirty(s_status_layer_l);
+    }
   }
   if (s_time_roll_tick > 0) {
     s_time_roll_tick++;
     if (s_time_roll_tick > TIME_ROLL_TICKS) { s_time_roll_tick = 0; s_time_prev[0] = '\0'; }
     else { more = true; }
     layer_mark_dirty(s_time_layer_l);
-  }
-  if (s_beat_tick > 0) {
-    s_beat_tick++;
-    if (s_beat_tick > BEAT_TICKS) { s_beat_tick = 0; }
-    else { more = true; }
-    layer_mark_dirty(s_ring_layer);
   }
   if (s_spark_tick > 0) {
     s_spark_tick++;
@@ -422,26 +434,24 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     }
   }
 
-  // tracking: a bright dot hops around the ring, one step per second
+  // tracking: a bright dot hops around the ring, one step per second.
+  // Hand-rolled polar math - gpoint_from_polar faulted here on emery.
   if (is_tracking() && !dim) {
-    int32_t ang = (int32_t)TRIG_MAX_ANGLE * (time(NULL) % 60) / 60;
-    GPoint d = gpoint_from_polar(r, GOvalScaleModeFitCircle, ang);
+    int32_t ang = TRIG_MAX_ANGLE * (int)(time(NULL) % 60) / 60;
+    int rad = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 5;
+    GPoint c = grect_center_point(&b);
+    GPoint d = {
+      .x = (int16_t)(c.x + sin_lookup(ang) * rad / TRIG_MAX_RATIO),
+      .y = (int16_t)(c.y - cos_lookup(ang) * rad / TRIG_MAX_RATIO),
+    };
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_circle(ctx, d, 5);
     graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorMintGreen, GColorWhite));
     graphics_fill_circle(ctx, d, 3);
   }
 
-  // Lower row: heart rate (left), the week sparkline (centre), tasks-left
-  // (right). All muted in Quiet Time.
+  // week sparkline, centred, just below the digits
   int base = b.size.h - 40;
-  // On a rectangular screen the HR / tasks labels drop into the bottom
-  // corners, clear of the ring; a round screen has no corners so they stay
-  // level with the sparkline.
-  int corner_y = PBL_IF_RECT_ELSE(b.size.h - 22, base - 18);
-  GFont f14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);
-
-  // sparkline
   {
     int maxv = 1;
     for (int i = 0; i < 7; i++) { if (s_week[i] > maxv) { maxv = s_week[i]; } }
@@ -458,25 +468,16 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
       graphics_fill_rect(ctx, GRect(x0 + i * (bw + gap), base - hh, bw, hh), 0, GCornerNone);
     }
   }
+}
 
-  // heart rate, bottom-left: a tiny heart + BPM
-  if (s_hr > 0) {
-    GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, GColorWhite);
-    int hx = 8, hy = corner_y + 6;
-    int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;  // heartbeat swell
-    graphics_context_set_fill_color(ctx, hc);
-    graphics_fill_circle(ctx, GPoint(hx + 2, hy + 3), 2 + sw);
-    graphics_fill_circle(ctx, GPoint(hx + 6, hy + 3), 2 + sw);
-    graphics_fill_rect(ctx, GRect(hx - sw, hy + 3, 8 + 2 * sw, 3 + sw), 0, GCornerNone);
-    graphics_fill_rect(ctx, GRect(hx + 2 - sw, hy + 6 + sw, 4 + 2 * sw, 2), 0, GCornerNone);
-    char hb[8];
-    snprintf(hb, sizeof(hb), "%d", s_hr);
-    graphics_context_set_text_color(ctx, hc);
-    graphics_draw_text(ctx, hb, f14, GRect(hx + 12, corner_y, 40, 16),
-                       GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-  }
+// Bottom strip: tasks-left today. Its own layer, well clear of the status
+// line, so a long marquee never drags it into a redraw.
+static void lower_update_proc(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  bool dim = quiet_time_is_active();
+  GFont f14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  int rx = PBL_IF_RECT_ELSE(6, 26);
 
-  // tasks remaining today, bottom-right
   if (s_total > 0) {
     int left = s_total - s_done;
     char tb[16];
@@ -486,7 +487,7 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
         dim ? GColorDarkGray
             : (left <= 0 ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
                          : PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite)));
-    graphics_draw_text(ctx, tb, f14, GRect(b.size.w - 62, corner_y, 56, 16),
+    graphics_draw_text(ctx, tb, f14, GRect(b.size.w - rx - 80, 0, 80, 18),
                        GTextOverflowModeFill, GTextAlignmentRight, NULL);
   }
 }
@@ -565,11 +566,6 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #if defined(PBL_HEALTH)
   if ((units & MINUTE_UNIT) || s_steps == 0) {
     s_steps = (int)health_service_sum_today(HealthMetricStepCount);
-    // peek returns 0 when there's no recent reading / no sensor.
-    HealthValue bpm = health_service_peek_current_value(HealthMetricHeartRateBPM);
-    int newhr = bpm > 0 ? (int)bpm : 0;
-    if (newhr > 0 && newhr != s_hr) { s_beat_tick = 1; kick_anim(); }  // thump
-    s_hr = newhr;
   }
 #endif
 
@@ -578,6 +574,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
     layer_mark_dirty(s_ring_layer);  // steps the tracking dot round the ring
   }
   layer_mark_dirty(s_top_layer);
+  if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }  // QT / task-count staleness
 }
 
 // ---------- messages ----------
@@ -662,6 +659,7 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
 
   render_status();
   layer_mark_dirty(s_ring_layer);
+  if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }  // task count changed
 }
 
 static void tap_handler(AccelAxisType axis, int32_t direction) {
@@ -689,6 +687,10 @@ static void window_load(Window *window) {
   s_top_layer = layer_create(GRect(0, 2, b.size.w, 18));
   layer_set_update_proc(s_top_layer, top_update_proc);
   layer_add_child(root, s_top_layer);
+
+  s_lower_layer = layer_create(GRect(0, b.size.h - 22, b.size.w, 22));
+  layer_set_update_proc(s_lower_layer, lower_update_proc);
+  layer_add_child(root, s_lower_layer);
 
   s_time_layer_l = layer_create(GRect(0, cy - 42, b.size.w, 46));
   layer_set_update_proc(s_time_layer_l, time_update_proc);
@@ -728,7 +730,10 @@ static void window_unload(Window *window) {
   if (s_anim_timer) { app_timer_cancel(s_anim_timer); s_anim_timer = NULL; }
   layer_destroy(s_ring_layer);
   layer_destroy(s_top_layer);
+  layer_destroy(s_lower_layer);
+  s_lower_layer = NULL;
   layer_destroy(s_status_layer_l);
+  s_status_layer_l = NULL;
   layer_destroy(s_time_layer_l);
   text_layer_destroy(s_date_layer);
 }
@@ -791,17 +796,9 @@ static void init(void) {
 
   app_message_register_inbox_received(inbox_received);
   app_message_open(512, 64);
-
-#if defined(PBL_HEALTH)
-  // Ask the HRM for a fresh reading every ~5 min so the quadrant isn't stale.
-  health_service_set_heart_rate_sample_period(300);
-#endif
 }
 
 static void deinit(void) {
-#if defined(PBL_HEALTH)
-  health_service_set_heart_rate_sample_period(0);
-#endif
   save_persisted();
   connection_service_unsubscribe();
   battery_state_service_unsubscribe();
