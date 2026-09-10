@@ -449,13 +449,16 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_stroke_width(ctx, PBL_IF_COLOR_ELSE(3, 1));
   graphics_draw_arc(ctx, r, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
 
-  // quarter marks on the track - the progress arc draws over the ones passed
+  // quarter marks on the track - the progress arc draws over the ones passed.
+  // The half mark (q == 2, straight down) is skipped: it sat right on top of
+  // the habits box in the bottom strip.
   {
     GPoint cc = grect_center_point(&b);
     int rr = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 3;
     graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorFromRGB(85, 85, 85), GColorWhite));
     graphics_context_set_stroke_width(ctx, 2);
     for (int q = 1; q <= 3; q++) {
+      if (q == 2) { continue; }
       int32_t a = TRIG_MAX_ANGLE * q / 4;
       int si = sin_lookup(a), co = cos_lookup(a);
       GPoint p1 = { (int16_t)(cc.x + si * (rr - 5) / TRIG_MAX_RATIO),
@@ -546,8 +549,9 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
-// Bottom strip: heart rate (left) + tasks-left (right). Its own layer, well
-// clear of the status line, so a long marquee never drags it into a redraw.
+// Bottom strip: heart rate (left), habits check + done/total (centre), tasks-left (right).
+// Its own layer, well clear of the status line, so a long marquee never drags
+// it into a redraw.
 static void lower_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   bool dim = quiet_time_is_active();
@@ -569,6 +573,31 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     snprintf(hb, sizeof(hb), "%d", s_hr);
     graphics_context_set_text_color(ctx, hc);
     graphics_draw_text(ctx, hb, f14, GRect(lx + 12, 0, 40, 18),
+                       GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  }
+
+  // habits, centre: a small check + today's done / total. The text goes green
+  // once they're all done. The tap-cycle still has the fuller
+  // "N/M habits · streak" line.
+  if (s_hab_total > 0) {
+    bool all = s_hab_done >= s_hab_total;
+    GColor hcol = dim ? GColorDarkGray
+        : (all ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
+               : PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
+    char rb[12];
+    snprintf(rb, sizeof(rb), "%d/%d", s_hab_done, s_hab_total);
+    int textw = graphics_text_layout_get_content_size(
+        rb, f14, GRect(0, 0, 60, 18), GTextOverflowModeFill, GTextAlignmentLeft).w;
+    int gw = 12;  // check glyph + gap
+    int x0 = b.size.w / 2 - (gw + textw) / 2;
+    int gy = 4;
+    graphics_context_set_stroke_color(ctx, hcol);
+    graphics_context_set_stroke_width(ctx, 2);
+    graphics_draw_line(ctx, GPoint(x0, gy + 4), GPoint(x0 + 3, gy + 7));
+    graphics_draw_line(ctx, GPoint(x0 + 3, gy + 7), GPoint(x0 + 8, gy + 1));
+    graphics_context_set_stroke_width(ctx, 1);
+    graphics_context_set_text_color(ctx, hcol);
+    graphics_draw_text(ctx, rb, f14, GRect(x0 + gw, 0, textw + 4, 18),
                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
   }
 

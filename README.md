@@ -11,8 +11,10 @@ face runs its own trimmed SuperSync client.
 - **Steps** (top-left) and a **battery** gauge (top-right); a "no phone" mark
   when Bluetooth drops.
 - A **week sparkline** - minutes worked each of the last 7 days.
-- **Heart rate** (bottom-left, watches with the sensor) and **tasks left
-  today** (bottom-right), in a strip along the bottom.
+- **Heart rate** (bottom-left, watches with the sensor), **habits done today**
+  (bottom-centre, a small check + `done / total` that goes green when they're
+  all done), and **tasks left today** (bottom-right), in a strip along the
+  bottom.
 - A **bottom line** that a wrist-tap cycles through:
   - the next timed task (`→ 3:15  Standup`)
   - `N / M done`
@@ -28,8 +30,9 @@ face runs its own trimmed SuperSync client.
 
 - The ring animates to a new fraction, sweeps up from zero on launch, deepens
   from grey-green toward bright green as you finish tasks, turns gold at 100%
-  with a one-shot white expanding flash and a short buzz. Three faint
-  quarter-marks sit on the track; the progress arc covers the ones passed.
+  with a one-shot white expanding flash and a short buzz. Faint marks sit on the
+  track at the quarter and three-quarter points (the half mark is dropped - it
+  clashed with the habits box); the progress arc covers the ones passed.
 - While a timer runs, a bright dot creeps around the ring - one step a
   minute, a full turn per tracked hour.
 - On launch the pieces stagger in: the ring sweeps and the sparkline grows,
