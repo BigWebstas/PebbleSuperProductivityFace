@@ -145,11 +145,6 @@ static int track_now_elapsed_s(void) {
 
 static bool is_tracking(void) { return s_track_received != 0 && s_track_title[0] != '\0'; }
 
-static void resubscribe_tick(void) {
-  tick_timer_service_unsubscribe();
-  tick_timer_service_subscribe(is_tracking() ? SECOND_UNIT : MINUTE_UNIT, tick_handler);
-}
-
 // ---------- render ----------
 static bool line_stale(void) {
   return s_last_ok != 0 && (time(NULL) - s_last_ok) > STALE_AFTER_S;
@@ -175,14 +170,11 @@ static void render_status(void) {
     strncpy(s_status_buf, "Open the app to pair", sizeof(s_status_buf));
   } else if (is_tracking()) {
     int e = track_now_elapsed_s();
-    int h = e / 3600, m = (e % 3600) / 60, s = e % 60;
+    int h = e / 3600, m = (e % 3600) / 60;
     bool over = s_track_over_s >= 0 && e >= s_track_over_s;
     const char *mark = over ? "! " : "";
-    if (h > 0) {
-      snprintf(s_status_buf, sizeof(s_status_buf), "%s▶ %d:%02d:%02d  %s", mark, h, m, s, s_track_title);
-    } else {
-      snprintf(s_status_buf, sizeof(s_status_buf), "%s▶ %d:%02d  %s", mark, m, s, s_track_title);
-    }
+    // minutes only - the face ticks once a minute, not every second
+    snprintf(s_status_buf, sizeof(s_status_buf), "%s▶ %d:%02d  %s", mark, h, m, s_track_title);
     s_status_color = over ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite)
                           : PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
   } else {
@@ -518,8 +510,10 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
 
   // tracking: a bright dot hops around the ring, one step per second.
   // Hand-rolled polar math - gpoint_from_polar faulted here on emery.
+  // Position by tracked minutes so it advances once a minute (a slow hand),
+  // not by the wall-clock second - the face only ticks per minute now.
   if (is_tracking() && !dim) {
-    int32_t ang = TRIG_MAX_ANGLE * (int)(time(NULL) % 60) / 60;
+    int32_t ang = TRIG_MAX_ANGLE * ((track_now_elapsed_s() / 60) % 60) / 60;
     int rad = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 5;
     GPoint c = grect_center_point(&b);
     GPoint d = {
@@ -679,7 +673,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   text_layer_set_text(s_date_layer, s_date_buf);
 
 #if defined(PBL_HEALTH)
-  if ((units & MINUTE_UNIT) || s_steps == 0) {
+  if (units & MINUTE_UNIT) {          // once a minute is plenty for steps + HR
     s_steps = (int)health_service_sum_today(HealthMetricStepCount);
     HealthValue bpm = health_service_peek_current_value(HealthMetricHeartRateBPM);
     int newhr = bpm > 0 ? (int)bpm : 0;   // 0 when no recent reading / no sensor
@@ -692,11 +686,14 @@ static void tick_handler(struct tm *t, TimeUnits units) {
 #endif
 
   if (is_tracking()) {
-    render_status();                 // ticks the ▶ timer every second
-    layer_mark_dirty(s_ring_layer);  // steps the tracking dot round the ring
+    render_status();  // ticks the ▶ timer; its redraw recomposites the ring + dot
   }
-  layer_mark_dirty(s_top_layer);
-  if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }  // QT / task-count staleness
+  // the top strip and the bottom strip only change minute-to-minute - don't
+  // repaint them 60x a minute while a timer is running
+  if (units & MINUTE_UNIT) {
+    layer_mark_dirty(s_top_layer);
+    if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
 }
 
 // ---------- messages ----------
@@ -722,7 +719,6 @@ static void parse_week_csv(const char *csv) {
 
 static void inbox_received(DictionaryIterator *iter, void *ctx) {
   Tuple *t;
-  bool was_tracking = is_tracking();
 
   if ((t = dict_find(iter, KEY_STATUS))) { s_status = t->value->int32; }
   if ((t = dict_find(iter, KEY_DONE)))   { s_done = t->value->int32; }
@@ -769,7 +765,6 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   }
 
   if (s_status == 0) { s_last_ok = time(NULL); }
-  if (is_tracking() != was_tracking) { resubscribe_tick(); }
 
   // animate the ring toward the new fraction; flash once when it just completed
   int new_target = (s_total > 0) ? (s_done * 1000 / s_total) : 0;
@@ -924,7 +919,7 @@ static void init(void) {
   app_message_open(512, 64);
 
 #if defined(PBL_HEALTH)
-  health_service_set_heart_rate_sample_period(300);  // a fresh HR reading ~every 5 min
+  health_service_set_heart_rate_sample_period(600);  // a fresh HR reading ~every 10 min
 #endif
 }
 

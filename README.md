@@ -19,8 +19,8 @@ face runs its own trimmed SuperSync client.
   - `Xh Ym worked`
   - `Xh Ym left` (estimate remaining)
   - `N / M habits` (+ the longest live streak)
-  - When a timer is running anywhere it takes over: `▶ 0:42:15  <task>`,
-    ticking every second.
+  - When a timer is running anywhere it takes over: `▶ 0:42  <task>`,
+    updating each minute (the face ticks per minute, never per second).
 - A `~` prefix + grey text when the last sync is over an hour old.
 - **Quiet Time**: the line goes grey, the ring and sparkline dim.
 
@@ -30,7 +30,8 @@ face runs its own trimmed SuperSync client.
   from grey-green toward bright green as you finish tasks, turns gold at 100%
   with a one-shot white expanding flash and a short buzz. Three faint
   quarter-marks sit on the track; the progress arc covers the ones passed.
-- While a timer runs, a bright dot hops around the ring once a minute.
+- While a timer runs, a bright dot creeps around the ring - one step a
+  minute, a full turn per tracked hour.
 - On launch the pieces stagger in: the ring sweeps and the sparkline grows,
   then the minute rolls in, then the bottom line slides up.
 - The minute rolls vertically on each change - only the digits that changed.
@@ -50,9 +51,10 @@ face runs its own trimmed SuperSync client.
 
 All motion rides one 33 ms timer that stops itself when nothing's moving.
 
-Re-syncs on launch, on a tap, and every 10-60 min (configurable). The live
-timer needs the opt-in "Show the live-tracked task" toggle - it holds a
-WebSocket open and costs battery.
+Re-syncs on launch and every 10-60 min (configurable). A tap re-pushes the
+cached view instantly and only hits the server if the last sync is over a
+minute old. The live tracked task needs the opt-in "Show the live-tracked
+task" toggle - it holds a WebSocket open and costs phone battery.
 
 ## Sync
 

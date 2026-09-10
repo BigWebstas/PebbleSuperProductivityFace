@@ -286,7 +286,14 @@ Pebble.addEventListener('ready', function () {
 
 Pebble.addEventListener('appmessage', function (e) {
   if (e.payload && e.payload.MSG_TYPE === MSG_REFRESH_REQUEST) {
-    doSync();
+    // A tap always re-pushes the cached view (instant, no radio). A full
+    // server sync only if the last one is over a minute old - repeated taps
+    // shouldn't each wake the radio.
+    if (Date.now() - lastPollAt >= 60 * 1000) {
+      doSync();
+    } else {
+      try { pushFaceData(loadState()); } catch (err) {}
+    }
     if (presenceClient) { pushTracking(); }
   }
 });
