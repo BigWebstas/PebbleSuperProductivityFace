@@ -28,11 +28,15 @@ face runs its own trimmed SuperSync client.
 
 - The ring animates to a new fraction, sweeps up from zero on launch, deepens
   from grey-green toward bright green as you finish tasks, turns gold at 100%
-  with a one-shot white expanding flash.
+  with a one-shot white expanding flash and a short buzz. Three faint
+  quarter-marks sit on the track; the progress arc covers the ones passed.
 - While a timer runs, a bright dot hops around the ring once a minute.
 - On launch the pieces stagger in: the ring sweeps and the sparkline grows,
   then the minute rolls in, then the bottom line slides up.
-- The minute rolls vertically on each change.
+- The minute rolls vertically on each change - only the digits that changed.
+- A crescent moon shows in the top strip during Quiet Time; the strip flashes
+  a green underline when the phone reconnects. A gold check sits below the
+  sparkline once every task is done.
 - The heart icon gives a small thump each time a fresh reading lands.
 - The bottom line cross-slides on a change and, for a long task name, scrolls
   once inside the ring's width then parks at the start.
