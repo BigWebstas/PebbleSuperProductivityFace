@@ -80,6 +80,7 @@ static GColor s_status_color;
 #define TIME_ROLL_TICKS 6      // minute vertical-roll length
 #define SPARK_TICKS 8          // sparkline grow-in length
 #define BEAT_TICKS 5           // heart-rate thump length
+#define BT_FLASH_TICKS 12      // reconnect underline length
 #define INTRO_TICKS 12         // launch stagger length
 #define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
 static AppTimer *s_anim_timer = NULL;
@@ -95,6 +96,7 @@ static int s_time_roll_tick = 0;    // 0 = idle
 static char s_time_prev[8] = "";
 static int s_spark_tick = 0;         // 0 = idle (bars at full height)
 static int s_beat_tick = 0;          // 0 = idle (heart-rate thump)
+static int s_bt_flash = 0;           // 0 = idle (phone-reconnected underline)
 static int s_intro_tick = 0;         // 0 = idle
 static bool s_status_warn = false;   // est-remaining overshoots the day -> red line
 static int s_status_w = 148;         // status layer width (set to fit inside the ring)
@@ -254,8 +256,15 @@ static void render_status_stats(void) {
       break;
     default: // 0 = auto: next task, else done count
       if (s_next_min >= 0 && s_next_min < 1440 && s_next_title[0]) {
-        fmt_clock(s_next_min, a, sizeof(a));
-        snprintf(s_status_buf, sizeof(s_status_buf), "%s→ %s  %s", prefix, a, s_next_title);
+        time_t nowt = time(NULL);
+        struct tm *lt = localtime(&nowt);
+        int delta = s_next_min - (lt->tm_hour * 60 + lt->tm_min);
+        if (delta >= 0 && delta < 90) {   // soon: count down instead of a clock time
+          snprintf(s_status_buf, sizeof(s_status_buf), "%sin %dm  %s", prefix, delta, s_next_title);
+        } else {
+          fmt_clock(s_next_min, a, sizeof(a));
+          snprintf(s_status_buf, sizeof(s_status_buf), "%s→ %s  %s", prefix, a, s_next_title);
+        }
       } else if (s_total > 0) {
         fmt_hm(s_worked_min, b, sizeof(b));
         snprintf(s_status_buf, sizeof(s_status_buf), "%s%d/%d done · %s", prefix, s_done, s_total, b);
@@ -303,27 +312,57 @@ static void status_update_proc(Layer *layer, GContext *ctx) {
   }
 }
 
-// The minute, drawn by hand so it can roll vertically on a change (old value
-// slides up and out, new value rises in from below). Clipped by its layer.
+// The minute, drawn by hand a glyph at a time so that on a change only the
+// digits that actually changed roll vertically (old up and out, new in from
+// below). The layer clips the vertical overrun; each glyph's cell clips it
+// horizontally.
 static void time_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   GFont f = fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD);
   int span = b.size.h + 8;
   graphics_context_set_text_color(ctx, GColorWhite);
 
-  int roll = 0;
-  if (s_time_roll_tick > 0) {
+  int n = strlen(s_time_buf);
+  if (n == 0 || n > 6) {   // nothing / unexpected: fall back to a plain centred draw
+    graphics_draw_text(ctx, s_time_buf, f, GRect(0, TIME_TEXT_DY, b.size.w, span),
+                       GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+    return;
+  }
+
+  int w[6], total = 0;
+  for (int i = 0; i < n; i++) {
+    char one[2] = { s_time_buf[i], '\0' };
+    GSize sz = graphics_text_layout_get_content_size(
+        one, f, GRect(0, 0, 80, span), GTextOverflowModeFill, GTextAlignmentLeft);
+    w[i] = sz.w;
+    total += w[i];
+  }
+
+  bool rolling = s_time_roll_tick > 0 && s_time_prev[0];
+  int roll = 0, pn = 0;
+  if (rolling) {
     int p = s_time_roll_tick * 1000 / TIME_ROLL_TICKS;
     if (p > 1000) { p = 1000; }
     roll = span * p / 1000;
-    if (s_time_prev[0]) {
-      graphics_draw_text(ctx, s_time_prev, f, GRect(0, TIME_TEXT_DY - roll, b.size.w, span),
-                         GTextOverflowModeFill, GTextAlignmentCenter, NULL);
-    }
+    pn = strlen(s_time_prev);
   }
-  int16_t y = TIME_TEXT_DY + ((s_time_roll_tick > 0) ? (span - roll) : 0);
-  graphics_draw_text(ctx, s_time_buf, f, GRect(0, y, b.size.w, span),
-                     GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+
+  int x = (b.size.w - total) / 2;
+  for (int i = 0; i < n; i++) {
+    char cur[2] = { s_time_buf[i], '\0' };
+    bool changed = rolling && (pn != n || i >= pn || s_time_prev[i] != s_time_buf[i]);
+    if (changed) {
+      char old[2] = { (i < pn ? s_time_prev[i] : ' '), '\0' };
+      graphics_draw_text(ctx, old, f, GRect(x, TIME_TEXT_DY - roll, w[i] + 3, span),
+                         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+      graphics_draw_text(ctx, cur, f, GRect(x, TIME_TEXT_DY - roll + span, w[i] + 3, span),
+                         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    } else {
+      graphics_draw_text(ctx, cur, f, GRect(x, TIME_TEXT_DY, w[i] + 3, span),
+                         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    }
+    x += w[i];
+  }
 }
 
 static void anim_tick(void *data) {
@@ -379,6 +418,12 @@ static void anim_tick(void *data) {
     else { more = true; }
     if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
   }
+  if (s_bt_flash > 0) {
+    s_bt_flash++;
+    if (s_bt_flash > BT_FLASH_TICKS) { s_bt_flash = 0; }
+    else { more = true; }
+    layer_mark_dirty(s_top_layer);
+  }
   if (s_intro_tick > 0) {
     if (s_intro_tick == 2 && s_time_roll_tick == 0) { s_time_prev[0] = '\0'; s_time_roll_tick = 1; }
     if (s_intro_tick == 5) { s_status_prev[0] = '\0'; s_slide_tick = 1; }
@@ -412,6 +457,24 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_stroke_width(ctx, PBL_IF_COLOR_ELSE(3, 1));
   graphics_draw_arc(ctx, r, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
 
+  // quarter marks on the track - the progress arc draws over the ones passed
+  {
+    GPoint cc = grect_center_point(&b);
+    int rr = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 3;
+    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorFromRGB(85, 85, 85), GColorWhite));
+    graphics_context_set_stroke_width(ctx, 2);
+    for (int q = 1; q <= 3; q++) {
+      int32_t a = TRIG_MAX_ANGLE * q / 4;
+      int si = sin_lookup(a), co = cos_lookup(a);
+      GPoint p1 = { (int16_t)(cc.x + si * (rr - 5) / TRIG_MAX_RATIO),
+                    (int16_t)(cc.y - co * (rr - 5) / TRIG_MAX_RATIO) };
+      GPoint p2 = { (int16_t)(cc.x + si * (rr + 2) / TRIG_MAX_RATIO),
+                    (int16_t)(cc.y - co * (rr + 2) / TRIG_MAX_RATIO) };
+      graphics_draw_line(ctx, p1, p2);
+    }
+    graphics_context_set_stroke_width(ctx, 1);
+  }
+
   // progress: grey -> deepening green with completion; gold at 100%
   GColor prog;
   if (dim) {
@@ -441,6 +504,16 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
       graphics_draw_arc(ctx, pr, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
       graphics_context_set_stroke_width(ctx, 1);
     }
+  }
+
+  // everything done today: a small check just below the sparkline
+  if (complete && !dim) {
+    int cx = b.size.w / 2, cy2 = b.size.h - 34;
+    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorYellow, GColorWhite));
+    graphics_context_set_stroke_width(ctx, 3);
+    graphics_draw_line(ctx, GPoint(cx - 6, cy2 + 1), GPoint(cx - 2, cy2 + 5));
+    graphics_draw_line(ctx, GPoint(cx - 2, cy2 + 5), GPoint(cx + 7, cy2 - 4));
+    graphics_context_set_stroke_width(ctx, 1);
   }
 
   // tracking: a bright dot hops around the ring, one step per second.
@@ -568,6 +641,21 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     graphics_draw_text(ctx, "no phone", fonts_get_system_font(FONT_KEY_GOTHIC_14),
                        GRect(b.size.w / 2, 0, b.size.w / 2 - 30, 16),
                        GTextOverflowModeFill, GTextAlignmentRight, NULL);
+  } else if (quiet_time_is_active()) {
+    // a little crescent moon, centred, while Quiet Time is on
+    int mx = b.size.w / 2, my = 8;
+    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorPastelYellow, GColorWhite));
+    graphics_fill_circle(ctx, GPoint(mx, my), 5);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_circle(ctx, GPoint(mx + 3, my - 1), 5);
+  }
+
+  // brief green underline when the phone has just reconnected
+  if (s_bt_flash > 0) {
+    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite));
+    graphics_context_set_stroke_width(ctx, 2);
+    graphics_draw_line(ctx, GPoint(0, b.size.h - 1), GPoint(b.size.w, b.size.h - 1));
+    graphics_context_set_stroke_width(ctx, 1);
   }
 }
 
@@ -688,7 +776,10 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   if (new_target > 1000) { new_target = 1000; }
   bool newly_complete = new_target >= 1000 && s_ring_target < 1000;
   s_ring_target = new_target;
-  if (newly_complete) { s_pulse_tick = 1; }
+  if (newly_complete) {
+    s_pulse_tick = 1;
+    if (!quiet_time_is_active()) { vibes_short_pulse(); }  // you finished everything
+  }
   if (s_ring_shown != s_ring_target || s_pulse_tick > 0 || s_spark_tick > 0) { kick_anim(); }
 
   render_status();
@@ -703,6 +794,7 @@ static void tap_handler(AccelAxisType axis, int32_t direction) {
 }
 
 static void bt_handler(bool connected) {
+  if (connected && !s_bt) { s_bt_flash = 1; kick_anim(); }  // phone just came back
   s_bt = connected;
   layer_mark_dirty(s_top_layer);
 }
