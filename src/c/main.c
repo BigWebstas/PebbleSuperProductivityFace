@@ -209,7 +209,7 @@ static bool line_stale(void) {
   return s_last_ok != 0 && (time(NULL) - s_last_ok) > STALE_AFTER_S;
 }
 
-static GFont status_font(void) { return fonts_get_system_font(FONT_KEY_GOTHIC_18); }
+static GFont status_font(void) { return fonts_get_system_font(FONT_KEY_GOTHIC_24); }
 
 // Fills s_status_buf + s_status_color from the current state. Kicks a
 // cross-slide (and remembers the previous text) whenever the string changes,
@@ -250,7 +250,7 @@ static void render_status(void) {
   // marquee a line that overflows the (ring-clipped) width - but only for a
   // bounded burst, then park it at the start, so the redraw loop stops.
   GSize sz = graphics_text_layout_get_content_size(
-      s_status_buf, status_font(), GRect(0, 0, 1000, 24), GTextOverflowModeFill, GTextAlignmentLeft);
+      s_status_buf, status_font(), GRect(0, 0, 1000, 30), GTextOverflowModeFill, GTextAlignmentLeft);
   s_marquee_on = sz.w > s_status_w;
   if (!s_marquee_on) {
     s_marquee_off = 0; s_marquee_budget = 0; s_marquee_last[0] = '\0';
@@ -545,6 +545,21 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
                       (int32_t)TRIG_MAX_ANGLE * frac / 1000);
   }
   graphics_context_set_stroke_width(ctx, 1);
+
+  // leading-edge dot: a filled circle at the tip of the progress arc - a
+  // rounded cap that makes the current fill point obvious even when frac
+  // is small. Same colour as the arc, so it reads as part of it.
+  if (frac > 0 && frac < 1000) {
+    int32_t ang = (int32_t)TRIG_MAX_ANGLE * frac / 1000;
+    int rad = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - RING_INSET;
+    GPoint c = grect_center_point(&b);
+    GPoint d = {
+      .x = (int16_t)(c.x + sin_lookup(ang) * rad / TRIG_MAX_RATIO),
+      .y = (int16_t)(c.y - cos_lookup(ang) * rad / TRIG_MAX_RATIO),
+    };
+    graphics_context_set_fill_color(ctx, prog);
+    graphics_fill_circle(ctx, d, dim ? 3 : 7);
+  }
 
   // completion flash: a white ring expanding outward and fading
   if (s_pulse_tick > 0) {
@@ -923,11 +938,11 @@ static void window_load(Window *window) {
   layer_set_clips(s_time_layer_l, true);
   layer_add_child(root, s_time_layer_l);
 
-  s_date_home = GRect(0, cy + 4, b.size.w, 22);
+  s_date_home = GRect(0, cy + 4, b.size.w, 26);
   s_date_layer = text_layer_create(s_date_home);
   text_layer_set_background_color(s_date_layer, GColorClear);
   text_layer_set_text_color(s_date_layer, theme_secondary());
-  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(root, text_layer_get_layer(s_date_layer));
 
@@ -938,7 +953,7 @@ static void window_load(Window *window) {
   int sx = b.size.w / 2 - half + 6;
   if (sx < 4) { sx = 4; }
   s_status_w = b.size.w - 2 * sx;
-  s_status_layer_l = layer_create(GRect(sx, cy + 30, s_status_w, 24));
+  s_status_layer_l = layer_create(GRect(sx, cy + 30, s_status_w, 28));
   layer_set_update_proc(s_status_layer_l, status_update_proc);
   layer_set_clips(s_status_layer_l, true);
   layer_add_child(root, s_status_layer_l);
