@@ -92,6 +92,11 @@ static int s_glucose_sgv = 0;      // mg/dL, 0 = no reading yet
 static int s_glucose_trend = 0;    // xDrip trend code 1..7 (1=doubleUp..7=doubleDown), 0 = unknown
 static int s_glucose_age_s = 0;    // seconds old as of s_glucose_received, per the phone's report
 static time_t s_glucose_received = 0;
+// Low/high danger-zone flash, same latch-and-blink shape as the battery
+// alert below - fires once per crossing, re-arms once back in range.
+static bool s_glucose_low_alerted = false;
+static bool s_glucose_high_alerted = false;
+static int s_glucose_flash_tick = 0;   // 0 = idle
 static bool s_bt = true;
 static int s_show = SHOW_ALL;   // which elements to draw (config bitmask)
 // Battery health alert (optimize-charging style range) - set from the config
@@ -130,6 +135,7 @@ static GColor s_status_color;
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
 #define BATT_FLASH_TICKS 40    // battery-threshold gauge blink length (~1.3s)
+#define GLUCOSE_FLASH_TICKS 40 // low/high danger-zone blink length (~1.3s)
 #define INTRO_TICKS 12         // launch stagger length
 #define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
 static AppTimer *s_anim_timer = NULL;
@@ -507,6 +513,12 @@ static void anim_tick(void *data) {
     else { more = true; }
     layer_mark_dirty(s_top_layer);
   }
+  if (s_glucose_flash_tick > 0) {
+    s_glucose_flash_tick++;
+    if (s_glucose_flash_tick > GLUCOSE_FLASH_TICKS) { s_glucose_flash_tick = 0; }
+    else { more = true; }
+    layer_mark_dirty(s_top_layer);
+  }
   if (s_intro_tick > 0) {
     if (s_intro_tick == 2 && s_time_roll_tick == 0) { s_time_prev[0] = '\0'; s_time_roll_tick = 1; }
     if (s_intro_tick == 5) { s_status_prev[0] = '\0'; s_slide_tick = 1; }
@@ -735,6 +747,31 @@ static GColor glucose_color(int sgv) {
   return PBL_IF_COLOR_ELSE(GColorGreen, theme_fg());
 }
 
+// Blink the readout and vibrate once when a fresh reading crosses into the
+// low or high zone - same latch-and-blink shape as check_battery_alert().
+static void check_glucose_alert(int sgv) {
+  bool low = sgv > 0 && sgv < 70;
+  bool high = sgv > 180;
+
+  if (low && !s_glucose_low_alerted) {
+    s_glucose_low_alerted = true;
+    s_glucose_flash_tick = 1;
+    vibes_double_pulse();
+    kick_anim();
+  } else if (!low) {
+    s_glucose_low_alerted = false;
+  }
+
+  if (high && !s_glucose_high_alerted) {
+    s_glucose_high_alerted = true;
+    s_glucose_flash_tick = 1;
+    vibes_double_pulse();
+    kick_anim();
+  } else if (!high) {
+    s_glucose_high_alerted = false;
+  }
+}
+
 static void top_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   GColor fg = theme_fg();
@@ -805,6 +842,12 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     graphics_draw_text(ctx, gbuf, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
                        GRect(b.size.w / 2 - 45, -1, 90, 20),
                        GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+    // Blink a highlight box around the reading right after it crosses into
+    // the low or high zone - same cadence as the battery gauge's blink.
+    if (s_glucose_flash_tick > 0 && (s_glucose_flash_tick / 5) % 2 == 0) {
+      graphics_context_set_stroke_color(ctx, gcol);
+      graphics_draw_rect(ctx, GRect(b.size.w / 2 - 47, -3, 94, 24));
+    }
   }
 
   // brief green underline when the phone has just reconnected
@@ -938,6 +981,7 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
     if ((tt = dict_find(iter, KEY_GLUCOSE_TREND))) { s_glucose_trend = tt->value->int32; }
     if ((tt = dict_find(iter, KEY_GLUCOSE_AGE_S))) { s_glucose_age_s = tt->value->int32; }
     s_glucose_received = time(NULL);
+    check_glucose_alert(s_glucose_sgv);
     layer_mark_dirty(s_top_layer);
   }
   bool got_done = false, got_total = false;
