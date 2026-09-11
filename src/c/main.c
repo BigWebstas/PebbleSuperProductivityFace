@@ -27,6 +27,7 @@
 #define KEY_TRACK_OVER_S     MESSAGE_KEY_FACE_TRACKING_OVER_S  // session secs at which it passes its estimate, -1 = n/a
 
 #define KEY_SHOW_MASK        MESSAGE_KEY_FACE_SHOW_MASK
+#define KEY_THEME            MESSAGE_KEY_FACE_THEME        // 0 = black bg (default), 1 = white bg
 
 #define MSG_REFRESH_REQUEST 1
 
@@ -43,7 +44,7 @@
 // persist keys
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
        PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK, PK_LAST_OK,
-       PK_SHOW };
+       PK_SHOW, PK_THEME };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
@@ -77,6 +78,7 @@ static int s_steps = 0;
 static int s_hr = 0;         // last heart-rate reading, BPM (0 = none / no sensor)
 static bool s_bt = true;
 static int s_show = SHOW_ALL;   // which elements to draw (config bitmask)
+static bool s_light = false;    // false = black bg (default), true = white bg
 static int s_moon_cy = 0;       // Quiet Time moon centre, screen y (set in window_load)
 static bool s_qt_prev = false;  // last-seen Quiet Time state, to catch transitions
 
@@ -88,7 +90,11 @@ static GColor s_status_color;
 
 // animation state (one shared 33ms timer, self-stopping)
 #define ANIM_STEP_MS 33
-#define RING_STEP 55           // per-mille the shown ring moves per tick
+#define RING_STEP 20           // per-mille the shown ring moves per tick
+// How far the progress ring is inset from the layer edge. Bumped up so the
+// arc's bottom clears the habits box in the lower strip; round screens need
+// more because the ring can't lean on absent corners.
+#define RING_INSET PBL_IF_ROUND_ELSE(20, 10)
 #define PULSE_TICKS 16         // completion flash length
 #define SLIDE_TICKS 7          // line cross-slide length
 #define MARQUEE_STEP 2
@@ -127,6 +133,43 @@ static void kick_anim(void) {
   if (!s_anim_timer) {
     s_anim_timer = app_timer_register(ANIM_STEP_MS, anim_tick, NULL);
   }
+}
+
+// ---------- theme ----------
+// Everything below is drawn assuming a black background; these swap the
+// handful of roles a light theme needs (bg/fg, the two faint ring-track
+// grays, the secondary/date gray, the default status-line accent, and the
+// Quiet Time moon) while leaving the other status colours (red/green/yellow)
+// as-is - they read fine on either background.
+static GColor theme_bg(void)  { return s_light ? GColorWhite : GColorBlack; }
+static GColor theme_fg(void)  { return s_light ? GColorBlack : GColorWhite; }
+static GColor theme_secondary(void) {
+  return PBL_IF_COLOR_ELSE(s_light ? GColorBlack : GColorLightGray, theme_fg());
+}
+static GColor theme_track(void) {
+  return PBL_IF_COLOR_ELSE(s_light ? GColorLightGray : GColorFromRGB(42, 42, 42),
+                            theme_fg());
+}
+static GColor theme_mark(void) {
+  return PBL_IF_COLOR_ELSE(s_light ? GColorFromRGB(140, 140, 140) : GColorFromRGB(85, 85, 85),
+                            theme_fg());
+}
+// Default (non-warn, non-tracking) status-line colour. PictonBlue is a pale
+// pastel - fine against black but near-invisible against white, so light
+// theme drops to a darker blue instead.
+static GColor theme_accent(void) {
+  return PBL_IF_COLOR_ELSE(s_light ? GColorDukeBlue : GColorPictonBlue, theme_fg());
+}
+// Quiet Time moon disc. PastelYellow reads as a moon on black; on white it's
+// just a pale yellow smudge, so light theme draws it in fg (black) instead.
+static GColor theme_moon(void) {
+  return s_light ? theme_fg() : PBL_IF_COLOR_ELSE(GColorPastelYellow, theme_fg());
+}
+// "All good" text green (tracking under estimate, all habits done, all tasks
+// done). Pure GColorGreen is neon-bright and washes out on white, so light
+// theme drops to a darker shade.
+static GColor theme_green(void) {
+  return PBL_IF_COLOR_ELSE(s_light ? GColorIslamicGreen : GColorGreen, theme_fg());
 }
 
 // ---------- helpers ----------
@@ -178,7 +221,7 @@ static void render_status(void) {
   s_status_buf[0] = '\0';
 
   bool qt = quiet_time_is_active();
-  s_status_color = PBL_IF_COLOR_ELSE(GColorPictonBlue, GColorWhite);
+  s_status_color = theme_accent();
 
   if (s_status == 1 && !is_tracking()) {
     strncpy(s_status_buf, "Syncing…", sizeof(s_status_buf));
@@ -191,11 +234,10 @@ static void render_status(void) {
     const char *mark = over ? "! " : "";
     // minutes only - the face ticks once a minute, not every second
     snprintf(s_status_buf, sizeof(s_status_buf), "%s▶ %d:%02d  %s", mark, h, m, s_track_title);
-    s_status_color = over ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite)
-                          : PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
+    s_status_color = over ? PBL_IF_COLOR_ELSE(GColorRed, theme_fg()) : theme_green();
   } else {
     render_status_stats();
-    if (s_status_warn) { s_status_color = PBL_IF_COLOR_ELSE(GColorRed, GColorWhite); }
+    if (s_status_warn) { s_status_color = PBL_IF_COLOR_ELSE(GColorRed, theme_fg()); }
   }
 
   if (qt) { s_status_color = GColorDarkGray; }
@@ -328,7 +370,7 @@ static void time_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   GFont f = fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD);
   int span = b.size.h + 8;
-  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_context_set_text_color(ctx, theme_fg());
 
   int n = strlen(s_time_buf);
   if (n == 0 || n > 6) {   // nothing / unexpected: fall back to a plain centred draw
@@ -453,7 +495,7 @@ static void anim_tick(void *data) {
 
 static void ring_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
-  GRect r = grect_inset(b, GEdgeInsets(3));
+  GRect r = grect_inset(b, GEdgeInsets(RING_INSET));
   int frac = s_ring_shown;               // animated, not the raw done/total
   if (frac < 0) { frac = 0; }
   if (frac > 1000) { frac = 1000; }
@@ -461,7 +503,7 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   bool complete = s_total > 0 && s_done >= s_total;
 
   // faint full track
-  graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorFromRGB(42, 42, 42), GColorWhite));
+  graphics_context_set_stroke_color(ctx, theme_track());
   graphics_context_set_stroke_width(ctx, PBL_IF_COLOR_ELSE(3, 1));
   graphics_draw_arc(ctx, r, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
 
@@ -470,8 +512,8 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   // the habits box in the bottom strip.
   {
     GPoint cc = grect_center_point(&b);
-    int rr = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 3;
-    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorFromRGB(85, 85, 85), GColorWhite));
+    int rr = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - RING_INSET;
+    graphics_context_set_stroke_color(ctx, theme_mark());
     graphics_context_set_stroke_width(ctx, 2);
     for (int q = 1; q <= 3; q++) {
       if (q == 2) { continue; }
@@ -489,11 +531,11 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   // progress: grey -> deepening green with completion; gold at 100%
   GColor prog;
   if (dim) {
-    prog = PBL_IF_COLOR_ELSE(GColorDarkGray, GColorWhite);
+    prog = PBL_IF_COLOR_ELSE(GColorDarkGray, theme_fg());
   } else if (complete) {
-    prog = PBL_IF_COLOR_ELSE(GColorYellow, GColorWhite);
+    prog = PBL_IF_COLOR_ELSE(GColorYellow, theme_fg());
   } else {
-    prog = PBL_IF_COLOR_ELSE(GColorFromRGB(0, 130 + frac * 125 / 1000, 45), GColorWhite);
+    prog = PBL_IF_COLOR_ELSE(GColorFromRGB(0, 130 + frac * 125 / 1000, 45), theme_fg());
   }
   graphics_context_set_stroke_color(ctx, prog);
   graphics_context_set_stroke_width(ctx, dim ? 2 : 5);
@@ -510,7 +552,7 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     int w = 6 - p * 6 / 1000;                        // 6 -> 0
     if (w > 0) {
       GRect pr = grect_inset(r, GEdgeInsets(-(p * 6 / 1000)));
-      graphics_context_set_stroke_color(ctx, GColorWhite);
+      graphics_context_set_stroke_color(ctx, theme_fg());
       graphics_context_set_stroke_width(ctx, w);
       graphics_draw_arc(ctx, pr, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
       graphics_context_set_stroke_width(ctx, 1);
@@ -520,29 +562,11 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   // everything done today: a small check just below the sparkline
   if (complete && !dim) {
     int cx = b.size.w / 2, cy2 = b.size.h - 34;
-    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorYellow, GColorWhite));
+    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorYellow, theme_fg()));
     graphics_context_set_stroke_width(ctx, 3);
     graphics_draw_line(ctx, GPoint(cx - 6, cy2 + 1), GPoint(cx - 2, cy2 + 5));
     graphics_draw_line(ctx, GPoint(cx - 2, cy2 + 5), GPoint(cx + 7, cy2 - 4));
     graphics_context_set_stroke_width(ctx, 1);
-  }
-
-  // tracking: a bright dot hops around the ring, one step per second.
-  // Hand-rolled polar math - gpoint_from_polar faulted here on emery.
-  // Position by tracked minutes so it advances once a minute (a slow hand),
-  // not by the wall-clock second - the face only ticks per minute now.
-  if (is_tracking() && !dim) {
-    int32_t ang = TRIG_MAX_ANGLE * ((track_now_elapsed_s() / 60) % 60) / 60;
-    int rad = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 5;
-    GPoint c = grect_center_point(&b);
-    GPoint d = {
-      .x = (int16_t)(c.x + sin_lookup(ang) * rad / TRIG_MAX_RATIO),
-      .y = (int16_t)(c.y - cos_lookup(ang) * rad / TRIG_MAX_RATIO),
-    };
-    graphics_context_set_fill_color(ctx, GColorBlack);
-    graphics_fill_circle(ctx, d, 5);
-    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorMintGreen, GColorWhite));
-    graphics_fill_circle(ctx, d, 3);
   }
 
   // week sparkline, centred, just below the digits
@@ -557,8 +581,8 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
       if (s_week[i] > 0 && hh < 2) { hh = 2; }
       if (s_spark_tick > 0) { hh = hh * s_spark_tick / SPARK_TICKS; }  // grow-in
       GColor bar = dim ? GColorDarkGray
-          : (i == 6 ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
-                    : PBL_IF_COLOR_ELSE(GColorFromRGB(60, 110, 150), GColorWhite));
+          : (i == 6 ? PBL_IF_COLOR_ELSE(GColorGreen, theme_fg())
+                    : PBL_IF_COLOR_ELSE(GColorFromRGB(60, 110, 150), theme_fg()));
       graphics_context_set_fill_color(ctx, bar);
       graphics_fill_rect(ctx, GRect(x0 + i * (bw + gap), base - hh, bw, hh), 0, GCornerNone);
     }
@@ -568,9 +592,9 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
   // time. Full disc, then a background disc carves the crescent.
   if (quiet_time_is_active() && s_moon_cy > 0) {
     int mx = b.size.w / 2, my = s_moon_cy, mr = 9;
-    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorPastelYellow, GColorWhite));
+    graphics_context_set_fill_color(ctx, theme_moon());
     graphics_fill_circle(ctx, GPoint(mx, my), mr);
-    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_context_set_fill_color(ctx, theme_bg());
     graphics_fill_circle(ctx, GPoint(mx + 5, my - 2), mr);
   }
 }
@@ -581,13 +605,13 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
 static void lower_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   bool dim = quiet_time_is_active();
-  GFont f14 = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+  GFont f18 = fonts_get_system_font(FONT_KEY_GOTHIC_18);
   int lx = PBL_IF_RECT_ELSE(8, 26);
   int rx = PBL_IF_RECT_ELSE(6, 26);
 
   // heart rate, left: a tiny heart + BPM (thumps on a fresh reading)
   if ((s_show & SHOW_HR) && s_hr > 0) {
-    GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, GColorWhite);
+    GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, theme_fg());
     int hy = 5;
     int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;
     graphics_context_set_fill_color(ctx, hc);
@@ -598,7 +622,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     char hb[8];
     snprintf(hb, sizeof(hb), "%d", s_hr);
     graphics_context_set_text_color(ctx, hc);
-    graphics_draw_text(ctx, hb, f14, GRect(lx + 12, 0, 40, 18),
+    graphics_draw_text(ctx, hb, f18, GRect(lx + 12, 0, 40, 18),
                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
   }
 
@@ -607,13 +631,11 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
   // "N/M habits · streak" line.
   if ((s_show & SHOW_HABITS) && s_hab_total > 0) {
     bool all = s_hab_done >= s_hab_total;
-    GColor hcol = dim ? GColorDarkGray
-        : (all ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
-               : PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
+    GColor hcol = dim ? GColorDarkGray : (all ? theme_green() : theme_secondary());
     char rb[12];
     snprintf(rb, sizeof(rb), "%d/%d", s_hab_done, s_hab_total);
     int textw = graphics_text_layout_get_content_size(
-        rb, f14, GRect(0, 0, 60, 18), GTextOverflowModeFill, GTextAlignmentLeft).w;
+        rb, f18, GRect(0, 0, 60, 18), GTextOverflowModeFill, GTextAlignmentLeft).w;
     int gw = 12;  // check glyph + gap
     int x0 = b.size.w / 2 - (gw + textw) / 2;
     int gy = 4;
@@ -623,7 +645,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     graphics_draw_line(ctx, GPoint(x0 + 3, gy + 7), GPoint(x0 + 8, gy + 1));
     graphics_context_set_stroke_width(ctx, 1);
     graphics_context_set_text_color(ctx, hcol);
-    graphics_draw_text(ctx, rb, f14, GRect(x0 + gw, 0, textw + 4, 18),
+    graphics_draw_text(ctx, rb, f18, GRect(x0 + gw, 0, textw + 4, 18),
                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
   }
 
@@ -633,10 +655,8 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     if (left <= 0) { snprintf(tb, sizeof(tb), "all done"); }
     else { snprintf(tb, sizeof(tb), "%d left", left); }
     graphics_context_set_text_color(ctx,
-        dim ? GColorDarkGray
-            : (left <= 0 ? PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite)
-                         : PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite)));
-    graphics_draw_text(ctx, tb, f14, GRect(b.size.w - rx - 80, 0, 80, 18),
+        dim ? GColorDarkGray : (left <= 0 ? theme_green() : theme_secondary()));
+    graphics_draw_text(ctx, tb, f18, GRect(b.size.w - rx - 80, 0, 80, 18),
                        GTextOverflowModeFill, GTextAlignmentRight, NULL);
   }
 }
@@ -655,14 +675,14 @@ static void draw_comma_int(GContext *ctx, GFont f, GRect box, int v, GTextAlignm
 
 static void top_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
-  GColor fg = PBL_IF_COLOR_ELSE(GColorWhite, GColorWhite);
+  GColor fg = theme_fg();
   graphics_context_set_text_color(ctx, fg);
 
   // steps, left
 #if defined(PBL_HEALTH)
   if ((s_show & SHOW_STEPS) && s_steps > 0) {
-    draw_comma_int(ctx, fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                   GRect(6, 0, b.size.w / 2, 16), s_steps, GTextAlignmentLeft);
+    draw_comma_int(ctx, fonts_get_system_font(FONT_KEY_GOTHIC_18),
+                   GRect(6, 0, b.size.w / 2, 18), s_steps, GTextAlignmentLeft);
   }
 #endif
 
@@ -670,25 +690,26 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
   if (s_show & SHOW_BATTERY) {
     BatteryChargeState bat = battery_state_service_peek();
     bool low = bat.charge_percent <= 10 && !bat.is_charging;
-    int px = b.size.w - 6 - 22, py = 5;
-    graphics_context_set_stroke_color(ctx, low ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite) : fg);
-    graphics_draw_rect(ctx, GRect(px, py, 20, 9));
-    graphics_draw_line(ctx, GPoint(px + 20, py + 2), GPoint(px + 20, py + 6));
-    GColor bc = bat.is_charging ? PBL_IF_COLOR_ELSE(GColorCyan, GColorWhite)
-              : bat.charge_percent <= 10 ? PBL_IF_COLOR_ELSE(GColorRed, GColorWhite)
-              : bat.charge_percent <= 25 ? PBL_IF_COLOR_ELSE(GColorChromeYellow, GColorWhite)
-              : PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite);
+    int bw = 24, bh = 11;
+    int px = b.size.w - 6 - bw - 2, py = 4;
+    graphics_context_set_stroke_color(ctx, low ? PBL_IF_COLOR_ELSE(GColorRed, theme_fg()) : fg);
+    graphics_draw_rect(ctx, GRect(px, py, bw, bh));
+    graphics_draw_line(ctx, GPoint(px + bw, py + 3), GPoint(px + bw, py + bh - 3));
+    GColor bc = bat.is_charging ? PBL_IF_COLOR_ELSE(GColorCyan, theme_fg())
+              : bat.charge_percent <= 10 ? PBL_IF_COLOR_ELSE(GColorRed, theme_fg())
+              : bat.charge_percent <= 25 ? PBL_IF_COLOR_ELSE(GColorChromeYellow, theme_fg())
+              : PBL_IF_COLOR_ELSE(GColorGreen, theme_fg());
     graphics_context_set_fill_color(ctx, bc);
-    graphics_fill_rect(ctx, GRect(px + 2, py + 2, bat.charge_percent * 16 / 100, 5), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(px + 2, py + 2, bat.charge_percent * (bw - 4) / 100, bh - 4), 0, GCornerNone);
     if (low) {  // an alert pip left of the gauge
-      graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, GColorWhite));
-      graphics_fill_rect(ctx, GRect(px - 7, py, 3, 9), 0, GCornerNone);
+      graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
+      graphics_fill_rect(ctx, GRect(px - 7, py, 3, bh), 0, GCornerNone);
     }
   }
 
   // phone-disconnected mark, centred in the top strip
   if (!s_bt) {
-    graphics_context_set_text_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, GColorWhite));
+    graphics_context_set_text_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
     graphics_draw_text(ctx, "no phone", fonts_get_system_font(FONT_KEY_GOTHIC_14),
                        GRect(b.size.w / 2, 0, b.size.w / 2 - 30, 16),
                        GTextOverflowModeFill, GTextAlignmentRight, NULL);
@@ -696,7 +717,7 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
 
   // brief green underline when the phone has just reconnected
   if (s_bt_flash > 0) {
-    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorGreen, GColorWhite));
+    graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorGreen, theme_fg()));
     graphics_context_set_stroke_width(ctx, 2);
     graphics_draw_line(ctx, GPoint(0, b.size.h - 1), GPoint(b.size.w, b.size.h - 1));
     graphics_context_set_stroke_width(ctx, 1);
@@ -748,6 +769,14 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   }
 }
 
+// Re-applies bg/fg to the pieces that aren't repainted by a plain
+// layer_mark_dirty (the window's own background, and the TextLayer's fixed
+// text colour) - called once at load and again on a runtime theme change.
+static void apply_theme(void) {
+  if (s_window) { window_set_background_color(s_window, theme_bg()); }
+  if (s_date_layer) { text_layer_set_text_color(s_date_layer, theme_secondary()); }
+}
+
 // ---------- messages ----------
 static void request_refresh(void) {
   DictionaryIterator *it;
@@ -777,6 +806,18 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
     layer_mark_dirty(s_ring_layer);
     layer_mark_dirty(s_top_layer);
     if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
+  if ((t = dict_find(iter, KEY_THEME))) {
+    bool light = t->value->int32 != 0;
+    if (light != s_light) {
+      s_light = light;
+      apply_theme();
+      layer_mark_dirty(s_ring_layer);
+      layer_mark_dirty(s_top_layer);
+      layer_mark_dirty(s_time_layer_l);
+      layer_mark_dirty(s_status_layer_l);
+      if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+    }
   }
   if ((t = dict_find(iter, KEY_STATUS))) { s_status = t->value->int32; }
   if ((t = dict_find(iter, KEY_DONE)))   { s_done = t->value->int32; }
@@ -824,11 +865,15 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
 
   if (s_status == 0) { s_last_ok = time(NULL); }
 
-  // animate the ring toward the new fraction; flash once when it just completed
+  // animate the ring toward the new fraction; flash once when it just completed.
+  // Every fresh sync (tap-refresh or the background poll) replays the fill
+  // from empty, same sweep as the launch intro, so a refresh reads as a
+  // refresh instead of a silent jump.
   int new_target = (s_total > 0) ? (s_done * 1000 / s_total) : 0;
   if (new_target > 1000) { new_target = 1000; }
   bool newly_complete = new_target >= 1000 && s_ring_target < 1000;
   s_ring_target = new_target;
+  s_ring_shown = 0;
   if (newly_complete) {
     s_pulse_tick = 1;
     if (!quiet_time_is_active()) { vibes_short_pulse(); }  // you finished everything
@@ -856,7 +901,7 @@ static void bt_handler(bool connected) {
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect b = layer_get_bounds(root);
-  window_set_background_color(window, GColorBlack);
+  apply_theme();
   int16_t cy = b.size.h / 2;
   s_moon_cy = cy / 2 - 12;         // Quiet Time moon: in the gap between ring top and time
   s_qt_prev = quiet_time_is_active();
@@ -881,14 +926,14 @@ static void window_load(Window *window) {
   s_date_home = GRect(0, cy + 4, b.size.w, 22);
   s_date_layer = text_layer_create(s_date_home);
   text_layer_set_background_color(s_date_layer, GColorClear);
-  text_layer_set_text_color(s_date_layer, PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
+  text_layer_set_text_color(s_date_layer, theme_secondary());
   text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
   layer_add_child(root, text_layer_get_layer(s_date_layer));
 
   // Keep the status line inside the ring: its band sits below centre, so
   // clip it to the ring's inner width there (plus a little for the stroke).
-  int rr = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 3;
+  int rr = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - RING_INSET;
   int half = isqrt_i(rr * rr - 54 * 54);
   int sx = b.size.w / 2 - half + 6;
   if (sx < 4) { sx = 4; }
@@ -898,7 +943,7 @@ static void window_load(Window *window) {
   layer_set_clips(s_status_layer_l, true);
   layer_add_child(root, s_status_layer_l);
 
-  s_status_color = PBL_IF_COLOR_ELSE(GColorPictonBlue, GColorWhite);
+  s_status_color = theme_accent();
   time_t now = time(NULL);
   tick_handler(localtime(&now), MINUTE_UNIT);
   render_status();
@@ -921,6 +966,7 @@ static void window_unload(Window *window) {
 
 static void load_persisted(void) {
   s_show = persist_exists(PK_SHOW) ? persist_read_int(PK_SHOW) : SHOW_ALL;
+  s_light = persist_exists(PK_THEME) ? persist_read_int(PK_THEME) != 0 : false;
   if (!persist_exists(PK_TOTAL)) { return; }
   s_done = persist_read_int(PK_DONE);
   s_total = persist_read_int(PK_TOTAL);
@@ -960,6 +1006,7 @@ static void save_persisted(void) {
   persist_write_string(PK_WEEK, csv);
   persist_write_int(PK_LAST_OK, (int)s_last_ok);
   persist_write_int(PK_SHOW, s_show);
+  persist_write_int(PK_THEME, s_light ? 1 : 0);
 }
 
 static void init(void) {

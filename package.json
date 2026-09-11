@@ -48,7 +48,8 @@
       "FACE_TRACKING_TITLE",
       "FACE_TRACKING_ELAPSED_S",
       "FACE_TRACKING_OVER_S",
-      "FACE_SHOW_MASK"
+      "FACE_SHOW_MASK",
+      "FACE_THEME"
     ]
   }
 }

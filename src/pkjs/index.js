@@ -28,6 +28,12 @@ function showMask(config) {
   return m;
 }
 
+// Background theme - 0 = black (default), 1 = white. Must match main.c's
+// KEY_THEME handling.
+function themeVal(config) {
+  return (config && config.theme === 'light') ? 1 : 0;
+}
+
 // Re-pull at most this often on the background timer; a tap forces one anyway.
 var POLL_MS = 20 * 60 * 1000;
 var lastPollAt = 0;
@@ -167,6 +173,7 @@ function pushFaceData(state) {
     FACE_HABIT_TITLE: topTitle.slice(0, 20),
     FACE_WEEK_CSV: weekCsv,
     FACE_SHOW_MASK: showMask(loadConfig()),
+    FACE_THEME: themeVal(loadConfig()),
   });
 }
 
@@ -182,6 +189,7 @@ function doSync() {
       FACE_HABIT_STREAK: 0, FACE_HABIT_TITLE: '', FACE_WEEK_CSV: '0,0,0,0,0,0,0',
       FACE_TRACKING_TITLE: '', FACE_TRACKING_ELAPSED_S: 0,
       FACE_SHOW_MASK: showMask(config),
+      FACE_THEME: themeVal(config),
     });
     return Promise.resolve();
   }
@@ -213,6 +221,13 @@ function doSync() {
       return client.restoreSnapshot(pts[0].serverSeq).then(function (snap) {
         var payload = snap && snap.encrypted && crypto ? crypto.decrypt(snap.payload) : snap;
         if (payload && payload.task) { state.task = payload.task.entities || payload.task; }
+        // Habits (SimpleCounter) live in their own AppDataComplete slice,
+        // same shape as task's - a snapshot restore that skips it leaves
+        // every habit created before the snapshot point (and its
+        // countOnDay history) missing until fresh ops happen to recreate it.
+        if (payload && payload.simpleCounter) {
+          state.simpleCounter = payload.simpleCounter.entities || payload.simpleCounter;
+        }
         lastSeq = pts[0].serverSeq;
       });
     }).catch(function (err) {
@@ -319,6 +334,7 @@ function configHtml(config) {
   var hasPw = !!localStorage.getItem('spf_password');
   var hasTok = !!(config && config.jwt);
   var showTracking = !!(config && config.showTracking);
+  var theme = (config && config.theme === 'light') ? 'light' : 'dark';
   var pollMin = (config && config.pollMin) || 20;
   var pollOpts = [10, 15, 20, 30, 60].map(function (v) {
     return '<option value="' + v + '"' + (v === pollMin ? ' selected' : '') + '>every ' + v + ' min</option>';
@@ -353,6 +369,11 @@ function configHtml(config) {
     '<input id="jwt" type="text" placeholder="' + (hasTok ? 'Saved - leave blank to keep' : 'Paste the token from the SuperSync login page') + '">' +
     '<label for="pollMin">Refresh</label>' +
     '<select id="pollMin">' + pollOpts + '</select>' +
+    '<label for="theme">Background</label>' +
+    '<select id="theme">' +
+    '<option value="dark"' + (theme === 'dark' ? ' selected' : '') + '>Black</option>' +
+    '<option value="light"' + (theme === 'light' ? ' selected' : '') + '>White</option>' +
+    '</select>' +
     '<div class="row"><input id="showTracking" type="checkbox"' + (showTracking ? ' checked' : '') + '>' +
     '<label for="showTracking">Show the live-tracked task</label></div>' +
     '<p class="hint">Holds a connection open to show what you\'re tracking right now, with a running timer. Uses noticeably more battery.</p>' +
@@ -361,6 +382,11 @@ function configHtml(config) {
     ck('hr', 'Heart rate') + ck('habits', 'Habits') + ck('tasks', 'Tasks remaining') +
     '<button id="save">Save</button>' +
     '<button id="cancel" class="secondary">Cancel</button>' +
+    '<button id="clearData" class="secondary">Clear cache &amp; resync</button>' +
+    '<p class="hint">Re-pulls everything from scratch. Use this if a stat looks stuck ' +
+    '(e.g. a habit checked on desktop not reflected here) - the face only replays sync ' +
+    'events forward, so a bug already worked around in a later update can leave old, ' +
+    'wrongly-computed data cached until you force a full resync.</p>' +
     '<script>' +
     'function close(d){location.href="pebblejs://close#"+encodeURIComponent(JSON.stringify(d))}' +
     'function g(i){return document.getElementById(i)}' +
@@ -370,10 +396,12 @@ function configHtml(config) {
     'password:g("password").value,' +
     'jwt:g("jwt").value.trim(),' +
     'pollMin:parseInt(g("pollMin").value,10)||20,' +
+    'theme:g("theme").value,' +
     'showTracking:g("showTracking").checked,' +
     'show:{steps:g("s_steps").checked,battery:g("s_battery").checked,spark:g("s_spark").checked,' +
     'hr:g("s_hr").checked,habits:g("s_habits").checked,tasks:g("s_tasks").checked}})};' +
     'document.getElementById("cancel").onclick=function(){close({cancelled:true})};' +
+    'document.getElementById("clearData").onclick=function(){close({clearData:true})};' +
     '</script></body></html>';
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
 }
@@ -387,6 +415,18 @@ Pebble.addEventListener('webviewclosed', function (e) {
   var r;
   try { r = JSON.parse(decodeURIComponent(e.response)); } catch (err) { return; }
   if (r.cancelled) { return; }
+
+  // "Clear cache & resync" - wipes the local op-log replay cache (credentials
+  // and options untouched), then a fresh doSync() bootstraps + replays from
+  // scratch. isFirst in doSync() keys off exactly this: lastSeq 0 and no
+  // cached tasks.
+  if (r.clearData) {
+    localStorage.removeItem('spf_entities');
+    localStorage.removeItem('spf_last_seq');
+    doSync();
+    return;
+  }
+
   var config = loadConfig() || {};
   var credsChanged = false;
   if (r.baseUrl && r.baseUrl !== config.baseUrl) { config.baseUrl = r.baseUrl; credsChanged = true; }
@@ -395,6 +435,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   if (r.password) { localStorage.setItem('spf_password', r.password); credsChanged = true; }
   config.pollMin = r.pollMin || 20;
   config.showTracking = !!r.showTracking;
+  config.theme = r.theme === 'light' ? 'light' : 'dark';
   if (r.show) { config.show = r.show; }
   saveConfig(config);
   POLL_MS = config.pollMin * 60 * 1000;
@@ -404,7 +445,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     localStorage.removeItem('spf_last_seq');
     localStorage.removeItem('spf_kdf_keys');
   }
-  sendToFace({ MSG_TYPE: 0, FACE_SHOW_MASK: showMask(config) });  // apply toggles now
+  sendToFace({ MSG_TYPE: 0, FACE_SHOW_MASK: showMask(config), FACE_THEME: themeVal(config) });  // apply toggles now
   doSync();
   applyPresence(config);
 });

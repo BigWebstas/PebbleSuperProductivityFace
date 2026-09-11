@@ -738,7 +738,19 @@ function applySimpleCounterAction(op, actionPayload, state) {
     // ForDate cases): a plain REPLACE of that single day's count
     // (Math.max(0, newVal)), not additive - unlike task time-tracking's
     // delta semantics. This is the "mark a habit done for today" action.
+    //
+    // NOTE the "For Date" string really is "[Simple Counter]" with a space -
+    // it's the one SimpleCounter action whose type literal breaks the
+    // "[SimpleCounter]" prefix every other action in that file uses (see
+    // simple-counter.actions.ts's setSimpleCounterCounterForDate /
+    // action-types.enum.ts COUNTER_SET_FOR_DATE). The habit-tracker calendar
+    // grid - the main way habits are ticked on the desktop - dispatches THIS
+    // action for every day incl. today, so the no-space spelling alone (a
+    // long-standing typo here) silently dropped every desktop habit check.
+    // The no-space variant is kept too in case a future SP release fixes the
+    // literal.
     case '[SimpleCounter] Set SimpleCounter Counter Today':
+    case '[Simple Counter] Set SimpleCounter Counter For Date':
     case '[SimpleCounter] Set SimpleCounter Counter For Date': {
       var cId = actionPayload.id;
       var day = actionPayload.today || actionPayload.date;
