@@ -337,6 +337,48 @@ function applyPresence(config) {
   presenceClient.connect();
 }
 
+// ---------- blood glucose (personal feature, this branch only) ----------
+// Polls xDrip+'s own local web service directly - Settings > Inter-app
+// settings > "xDrip Web Service" must be ON in xDrip+ on this phone. Same
+// endpoint and trend-code mapping as the standalone xDrip Pebble app; this
+// just asks for the latest reading instead of history, since the face only
+// has room to show a number and an arrow. Independent of doSync()'s poll -
+// a CGM reading changes every ~5 min and this is a local, radio-free call.
+var GLUCOSE_BASE = 'http://127.0.0.1:17580';
+var GLUCOSE_POLL_MS = 60 * 1000;
+var GLUCOSE_DIRECTION_TREND = {
+  DoubleUp: 1, SingleUp: 2, FortyFiveUp: 3, Flat: 4,
+  FortyFiveDown: 5, SingleDown: 6, DoubleDown: 7,
+};
+function fetchGlucose() {
+  var req = new XMLHttpRequest();
+  req.open('GET', GLUCOSE_BASE + '/sgv.json?count=1', true);
+  req.timeout = 8000;
+  req.onload = function () {
+    if (req.status !== 200) { return; }
+    var rows;
+    try { rows = JSON.parse(req.responseText); } catch (e) { return; }
+    if (!rows || !rows.length) { return; }
+    var latest = rows[0];
+    var sgv = parseInt(latest.sgv, 10) || 0;
+    if (sgv <= 0) { return; }
+    var trend = parseInt(latest.trend, 10);
+    if (!trend || trend < 1 || trend > 7) { trend = GLUCOSE_DIRECTION_TREND[latest.direction] || 0; }
+    var ageMs = Date.now() - (parseInt(latest.date, 10) || Date.now());
+    sendToFace({
+      MSG_TYPE: 0,
+      FACE_GLUCOSE_SGV: sgv,
+      FACE_GLUCOSE_TREND: trend,
+      FACE_GLUCOSE_AGE_S: Math.max(0, Math.round(ageMs / 1000)),
+    });
+  };
+  // xDrip+'s web service being off, or the phone just not having it
+  // installed, are both silent no-ops - the face just shows nothing.
+  req.onerror = function () {};
+  req.ontimeout = function () {};
+  req.send();
+}
+
 // ---------- events ----------
 Pebble.addEventListener('ready', function () {
   console.log('[spf] ready');
@@ -344,6 +386,8 @@ Pebble.addEventListener('ready', function () {
   if (config && config.pollMin) { POLL_MS = config.pollMin * 60 * 1000; }
   doSync();
   applyPresence(config);
+  fetchGlucose();
+  setInterval(fetchGlucose, GLUCOSE_POLL_MS);
   setInterval(function () {
     if (Date.now() - lastPollAt >= POLL_MS) { doSync(); }
   }, 60 * 1000);

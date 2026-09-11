@@ -33,6 +33,11 @@
 #define KEY_BATT_SOUND       MESSAGE_KEY_FACE_BATT_SOUND    // 0/1, alert cue (speaker tone, or vibrate if there's no speaker) on either threshold
 #define KEY_BATT_VOLUME      MESSAGE_KEY_FACE_BATT_VOLUME_PCT  // speaker volume for the alert cue, 0-100
 
+// Personal feature (this branch only): xDrip+ local API glucose readout.
+#define KEY_GLUCOSE_SGV      MESSAGE_KEY_FACE_GLUCOSE_SGV    // mg/dL, 0 = no reading yet
+#define KEY_GLUCOSE_TREND    MESSAGE_KEY_FACE_GLUCOSE_TREND  // xDrip trend code 1..7, 0 = unknown
+#define KEY_GLUCOSE_AGE_S    MESSAGE_KEY_FACE_GLUCOSE_AGE_S  // seconds old as of the phone's report
+
 #define MSG_REFRESH_REQUEST 1
 
 // which face elements are drawn - a bitmask set from the config page. All on
@@ -48,7 +53,8 @@
 // persist keys
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
        PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK, PK_LAST_OK,
-       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME };
+       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME,
+       PK_GLUCOSE_SGV, PK_GLUCOSE_TREND, PK_GLUCOSE_AGE, PK_GLUCOSE_RX };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
@@ -80,6 +86,12 @@ static time_t s_last_ok = 0;
 static int s_line_mode = 0;
 static int s_steps = 0;
 static int s_hr = 0;         // last heart-rate reading, BPM (0 = none / no sensor)
+// Blood glucose from xDrip+'s local web service, polled by the phone JS -
+// see src/pkjs/index.js's fetchGlucose(). Personal feature, not toggleable.
+static int s_glucose_sgv = 0;      // mg/dL, 0 = no reading yet
+static int s_glucose_trend = 0;    // xDrip trend code 1..7 (1=doubleUp..7=doubleDown), 0 = unknown
+static int s_glucose_age_s = 0;    // seconds old as of s_glucose_received, per the phone's report
+static time_t s_glucose_received = 0;
 static bool s_bt = true;
 static int s_show = SHOW_ALL;   // which elements to draw (config bitmask)
 // Battery health alert (optimize-charging style range) - set from the config
@@ -709,6 +721,20 @@ static void draw_comma_int(GContext *ctx, GFont f, GRect box, int v, GTextAlignm
   graphics_draw_text(ctx, out, f, box, GTextOverflowModeFill, al, NULL);
 }
 
+// Blood glucose (xDrip+ local API, personal feature). Age keeps ticking
+// locally between phone polls, same pattern as the tracking timer's
+// s_track_received - see trackedOverS()'s equivalent in the JS side.
+static int glucose_effective_age_s(void) {
+  if (s_glucose_sgv <= 0) { return 0; }
+  return s_glucose_age_s + (int)(time(NULL) - s_glucose_received);
+}
+
+static GColor glucose_color(int sgv) {
+  if (sgv < 70)  { return PBL_IF_COLOR_ELSE(GColorRed, theme_fg()); }
+  if (sgv > 180) { return PBL_IF_COLOR_ELSE(GColorYellow, theme_fg()); }
+  return PBL_IF_COLOR_ELSE(GColorGreen, theme_fg());
+}
+
 static void top_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   GColor fg = theme_fg();
@@ -756,6 +782,29 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     graphics_draw_text(ctx, "no phone", fonts_get_system_font(FONT_KEY_GOTHIC_14),
                        GRect(b.size.w / 2, 0, b.size.w / 2 - 30, 16),
                        GTextOverflowModeFill, GTextAlignmentRight, NULL);
+  } else if (s_glucose_sgv > 0) {
+    // Blood glucose, top centre - no phone means no fresh xDrip+ poll either,
+    // so this and the mark above never really compete for the same spot.
+    char gbuf[16];
+    const char *arrow;
+    switch (s_glucose_trend) {
+      case 1: arrow = "^^"; break;   // double up
+      case 2: arrow = "^";  break;
+      case 3: arrow = "/";  break;
+      case 4: arrow = "-";  break;
+      case 5: arrow = "\\"; break;
+      case 6: arrow = "v";  break;
+      case 7: arrow = "vv"; break;   // double down
+      default: arrow = "";  break;
+    }
+    snprintf(gbuf, sizeof(gbuf), "%d%s", s_glucose_sgv, arrow);
+    GColor gcol = glucose_effective_age_s() > 720   // stale past ~12 min
+      ? PBL_IF_COLOR_ELSE(GColorLightGray, theme_fg())
+      : glucose_color(s_glucose_sgv);
+    graphics_context_set_text_color(ctx, gcol);
+    graphics_draw_text(ctx, gbuf, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                       GRect(b.size.w / 2 - 45, -1, 90, 20),
+                       GTextOverflowModeFill, GTextAlignmentCenter, NULL);
   }
 
   // brief green underline when the phone has just reconnected
@@ -883,6 +932,14 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   if ((t = dict_find(iter, KEY_BATT_HIGH))) { s_batt_high_pct = t->value->int32; }
   if ((t = dict_find(iter, KEY_BATT_SOUND))) { s_batt_sound = t->value->int32 != 0; }
   if ((t = dict_find(iter, KEY_BATT_VOLUME))) { s_batt_volume = t->value->int32; }
+  if ((t = dict_find(iter, KEY_GLUCOSE_SGV))) {
+    s_glucose_sgv = t->value->int32;
+    Tuple *tt;
+    if ((tt = dict_find(iter, KEY_GLUCOSE_TREND))) { s_glucose_trend = tt->value->int32; }
+    if ((tt = dict_find(iter, KEY_GLUCOSE_AGE_S))) { s_glucose_age_s = tt->value->int32; }
+    s_glucose_received = time(NULL);
+    layer_mark_dirty(s_top_layer);
+  }
   bool got_done = false, got_total = false;
   if ((t = dict_find(iter, KEY_STATUS))) { s_status = t->value->int32; }
   if ((t = dict_find(iter, KEY_DONE)))   { s_done = t->value->int32; got_done = true; }
@@ -1104,6 +1161,12 @@ static void load_persisted(void) {
   s_batt_high_pct = persist_exists(PK_BATT_HIGH) ? persist_read_int(PK_BATT_HIGH) : 80;
   s_batt_sound = persist_exists(PK_BATT_SOUND) ? persist_read_int(PK_BATT_SOUND) != 0 : true;
   s_batt_volume = persist_exists(PK_BATT_VOLUME) ? persist_read_int(PK_BATT_VOLUME) : 80;
+  if (persist_exists(PK_GLUCOSE_RX)) {
+    s_glucose_sgv = persist_read_int(PK_GLUCOSE_SGV);
+    s_glucose_trend = persist_read_int(PK_GLUCOSE_TREND);
+    s_glucose_age_s = persist_read_int(PK_GLUCOSE_AGE);
+    s_glucose_received = (time_t)persist_read_int(PK_GLUCOSE_RX);
+  }
   if (!persist_exists(PK_TOTAL)) { return; }
   s_done = persist_read_int(PK_DONE);
   s_total = persist_read_int(PK_TOTAL);
@@ -1154,6 +1217,12 @@ static void save_persisted(void) {
   persist_write_int(PK_BATT_HIGH, s_batt_high_pct);
   persist_write_int(PK_BATT_SOUND, s_batt_sound ? 1 : 0);
   persist_write_int(PK_BATT_VOLUME, s_batt_volume);
+  if (s_glucose_sgv > 0) {
+    persist_write_int(PK_GLUCOSE_SGV, s_glucose_sgv);
+    persist_write_int(PK_GLUCOSE_TREND, s_glucose_trend);
+    persist_write_int(PK_GLUCOSE_AGE, s_glucose_age_s);
+    persist_write_int(PK_GLUCOSE_RX, (int)s_glucose_received);
+  }
 }
 
 static void init(void) {
