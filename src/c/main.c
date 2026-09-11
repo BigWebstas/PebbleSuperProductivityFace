@@ -28,6 +28,10 @@
 
 #define KEY_SHOW_MASK        MESSAGE_KEY_FACE_SHOW_MASK
 #define KEY_THEME            MESSAGE_KEY_FACE_THEME        // 0 = black bg (default), 1 = white bg
+#define KEY_BATT_LOW         MESSAGE_KEY_FACE_BATT_LOW_PCT   // alert once when discharging drops to/below this, 0 = off
+#define KEY_BATT_HIGH        MESSAGE_KEY_FACE_BATT_HIGH_PCT  // alert once when charging rises to/above this, 100 = off
+#define KEY_BATT_SOUND       MESSAGE_KEY_FACE_BATT_SOUND    // 0/1, alert cue (speaker tone, or vibrate if there's no speaker) on either threshold
+#define KEY_BATT_VOLUME      MESSAGE_KEY_FACE_BATT_VOLUME_PCT  // speaker volume for the alert cue, 0-100
 
 #define MSG_REFRESH_REQUEST 1
 
@@ -44,7 +48,7 @@
 // persist keys
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
        PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK, PK_LAST_OK,
-       PK_SHOW, PK_THEME };
+       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
@@ -78,6 +82,16 @@ static int s_steps = 0;
 static int s_hr = 0;         // last heart-rate reading, BPM (0 = none / no sensor)
 static bool s_bt = true;
 static int s_show = SHOW_ALL;   // which elements to draw (config bitmask)
+// Battery health alert (optimize-charging style range) - set from the config
+// page, persisted, re-armed once the level clears the zone it fired in so a
+// charge/discharge cycle can trip the same edge again.
+static int s_batt_low_pct = 20;    // 0 disables the low-side alert
+static int s_batt_high_pct = 80;   // 100 disables the high-side alert
+static bool s_batt_sound = true;
+static int s_batt_volume = 80;   // speaker volume for the alert cue, 0-100
+static bool s_batt_low_alerted = false;
+static bool s_batt_high_alerted = false;
+static int s_batt_flash_tick = 0;   // 0 = idle (threshold-crossed flash on the gauge)
 static bool s_light = false;    // false = black bg (default), true = white bg
 static int s_moon_cy = 0;       // Quiet Time moon centre, screen y (set in window_load)
 static bool s_qt_prev = false;  // last-seen Quiet Time state, to catch transitions
@@ -103,6 +117,7 @@ static GColor s_status_color;
 #define SPARK_TICKS 8          // sparkline grow-in length
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
+#define BATT_FLASH_TICKS 40    // battery-threshold gauge blink length (~1.3s)
 #define INTRO_TICKS 12         // launch stagger length
 #define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
 static AppTimer *s_anim_timer = NULL;
@@ -474,6 +489,12 @@ static void anim_tick(void *data) {
     else { more = true; }
     layer_mark_dirty(s_top_layer);
   }
+  if (s_batt_flash_tick > 0) {
+    s_batt_flash_tick++;
+    if (s_batt_flash_tick > BATT_FLASH_TICKS) { s_batt_flash_tick = 0; }
+    else { more = true; }
+    layer_mark_dirty(s_top_layer);
+  }
   if (s_intro_tick > 0) {
     if (s_intro_tick == 2 && s_time_roll_tick == 0) { s_time_prev[0] = '\0'; s_time_roll_tick = 1; }
     if (s_intro_tick == 5) { s_status_prev[0] = '\0'; s_slide_tick = 1; }
@@ -720,6 +741,13 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
       graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
       graphics_fill_rect(ctx, GRect(px - 7, py, 3, bh), 0, GCornerNone);
     }
+    // Blink a highlight ring around the gauge right after a configured
+    // low/high threshold is crossed - a few on/off cycles, then it settles
+    // back to the plain gauge (the low-battery pip above stays sticky instead).
+    if (s_batt_flash_tick > 0 && (s_batt_flash_tick / 5) % 2 == 0) {
+      graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
+      graphics_draw_rect(ctx, GRect(px - 3, py - 3, bw + 6, bh + 6));
+    }
   }
 
   // phone-disconnected mark, centred in the top strip
@@ -738,6 +766,15 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_stroke_width(ctx, 1);
   }
 }
+
+#if defined(PBL_HEALTH)
+// The HR sensor is one of the bigger battery draws on the watch - only ask
+// for elevated sampling while the face is actually showing a reading.
+// Re-applied whenever SHOW_HR is toggled at runtime, not just at launch.
+static void apply_hr_sampling(void) {
+  health_service_set_heart_rate_sample_period((s_show & SHOW_HR) ? 600 : 0);
+}
+#endif
 
 // ---------- time ----------
 static void tick_handler(struct tm *t, TimeUnits units) {
@@ -759,8 +796,13 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   text_layer_set_text(s_date_layer, s_date_buf);
 
 #if defined(PBL_HEALTH)
-  if (units & MINUTE_UNIT) {          // once a minute is plenty for steps + HR
+  // Once a minute is plenty for steps + HR - and skip whichever one is
+  // hidden, so a face with steps or HR toggled off doesn't keep paying for
+  // health_service reads nothing on screen will show.
+  if ((units & MINUTE_UNIT) && (s_show & SHOW_STEPS)) {
     s_steps = (int)health_service_sum_today(HealthMetricStepCount);
+  }
+  if ((units & MINUTE_UNIT) && (s_show & SHOW_HR)) {
     HealthValue bpm = health_service_peek_current_value(HealthMetricHeartRateBPM);
     int newhr = bpm > 0 ? (int)bpm : 0;   // 0 when no recent reading / no sensor
     if (newhr != s_hr) {
@@ -818,6 +860,9 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
 
   if ((t = dict_find(iter, KEY_SHOW_MASK))) {
     s_show = t->value->int32;
+#if defined(PBL_HEALTH)
+    apply_hr_sampling();  // react to SHOW_HR flipping without waiting for a relaunch
+#endif
     layer_mark_dirty(s_ring_layer);
     layer_mark_dirty(s_top_layer);
     if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
@@ -834,9 +879,14 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
       if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
     }
   }
+  if ((t = dict_find(iter, KEY_BATT_LOW)))  { s_batt_low_pct = t->value->int32; }
+  if ((t = dict_find(iter, KEY_BATT_HIGH))) { s_batt_high_pct = t->value->int32; }
+  if ((t = dict_find(iter, KEY_BATT_SOUND))) { s_batt_sound = t->value->int32 != 0; }
+  if ((t = dict_find(iter, KEY_BATT_VOLUME))) { s_batt_volume = t->value->int32; }
+  bool got_done = false, got_total = false;
   if ((t = dict_find(iter, KEY_STATUS))) { s_status = t->value->int32; }
-  if ((t = dict_find(iter, KEY_DONE)))   { s_done = t->value->int32; }
-  if ((t = dict_find(iter, KEY_TOTAL)))  { s_total = t->value->int32; }
+  if ((t = dict_find(iter, KEY_DONE)))   { s_done = t->value->int32; got_done = true; }
+  if ((t = dict_find(iter, KEY_TOTAL)))  { s_total = t->value->int32; got_total = true; }
   if ((t = dict_find(iter, KEY_WORKED_MIN))) { s_worked_min = t->value->int32; }
   if ((t = dict_find(iter, KEY_EST_MIN)))    { s_est_min = t->value->int32; }
   if ((t = dict_find(iter, KEY_NEXT_MIN)))   { s_next_min = t->value->int32; }
@@ -880,18 +930,26 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
 
   if (s_status == 0) { s_last_ok = time(NULL); }
 
-  // animate the ring toward the new fraction; flash once when it just completed.
-  // Every fresh sync (tap-refresh or the background poll) replays the fill
-  // from empty, same sweep as the launch intro, so a refresh reads as a
-  // refresh instead of a silent jump.
-  int new_target = (s_total > 0) ? (s_done * 1000 / s_total) : 0;
-  if (new_target > 1000) { new_target = 1000; }
-  bool newly_complete = new_target >= 1000 && s_ring_target < 1000;
-  s_ring_target = new_target;
-  s_ring_shown = 0;
-  if (newly_complete) {
-    s_pulse_tick = 1;
-    if (!quiet_time_is_active()) { vibes_short_pulse(); }  // you finished everything
+  // Animate the ring toward the new fraction only when this message actually
+  // carried a fresh done/total (pushFaceData always sends both together) -
+  // a status-only ping, a tracking update, or a config-only push shouldn't
+  // replay the fill, or it plays several times back-to-back (e.g. once per
+  // message on the way back to the watchface). And skip the replay when the
+  // fraction didn't actually move, so a redundant sync doesn't replay either.
+  // A genuine change still gets the full sweep from empty, same as the
+  // launch intro, so a refresh reads as a refresh instead of a silent jump.
+  if (got_done || got_total) {
+    int new_target = (s_total > 0) ? (s_done * 1000 / s_total) : 0;
+    if (new_target > 1000) { new_target = 1000; }
+    if (new_target != s_ring_target) {
+      bool newly_complete = new_target >= 1000 && s_ring_target < 1000;
+      s_ring_target = new_target;
+      s_ring_shown = 0;
+      if (newly_complete) {
+        s_pulse_tick = 1;
+        if (!quiet_time_is_active()) { vibes_short_pulse(); }  // you finished everything
+      }
+    }
   }
   if (s_ring_shown != s_ring_target || s_pulse_tick > 0 || s_spark_tick > 0) { kick_anim(); }
 
@@ -909,6 +967,66 @@ static void tap_handler(AccelAxisType axis, int32_t direction) {
 static void bt_handler(bool connected) {
   if (connected && !s_bt) { s_bt_flash = 1; kick_anim(); }  // phone just came back
   s_bt = connected;
+  layer_mark_dirty(s_top_layer);
+}
+
+// A four-chirp cue on the speaker, ~1s - only emery actually has one; every
+// other platform's SDK header stubs speaker_play_notes() out to a constant
+// `(0)` at the preprocessor level, so this is compiled out there entirely
+// (rather than built and silently discarded) and falls back to a vibration
+// in the same on/off shape (the motor has no volume control, so s_batt_volume
+// only reaches the speaker path).
+static void play_battery_alert_cue(void) {
+#if PBL_PLATFORM_EMERY
+  static const SpeakerNote notes[] = {
+    { .midi_note = 81, .waveform = SpeakerWaveformSine, .duration_ms = 180, .velocity = 90 }, // A5
+    { .midi_note = 0,  .waveform = SpeakerWaveformSine, .duration_ms = 70 },                  // rest
+    { .midi_note = 81, .waveform = SpeakerWaveformSine, .duration_ms = 180, .velocity = 90 },
+    { .midi_note = 0,  .waveform = SpeakerWaveformSine, .duration_ms = 70 },
+    { .midi_note = 81, .waveform = SpeakerWaveformSine, .duration_ms = 180, .velocity = 90 },
+    { .midi_note = 0,  .waveform = SpeakerWaveformSine, .duration_ms = 70 },
+    { .midi_note = 81, .waveform = SpeakerWaveformSine, .duration_ms = 320, .velocity = 90 }, // held final chirp
+  };
+  uint8_t vol = (uint8_t)(s_batt_volume < 0 ? 0 : s_batt_volume > 100 ? 100 : s_batt_volume);
+  if (speaker_play_notes(notes, ARRAY_LENGTH(notes), vol)) { return; }
+#endif
+  static const uint32_t segments[] = { 180, 70, 180, 70, 180, 70, 320 };
+  VibePattern pat = { .durations = segments, .num_segments = ARRAY_LENGTH(segments) };
+  vibes_enqueue_custom_pattern(pat);  // no speaker on this platform, or the sound is muted
+}
+
+// Battery health alert: flash + optional sound cue once when discharging
+// drops to/below the low threshold, or charging rises to/above the high one.
+// Each side latches so it only fires once per crossing, and re-arms once the
+// level clears back out of that zone (e.g. charging starts, or you unplug).
+// battery_state_service only calls back on an actual OS-level change, so this
+// never fires merely because the face was relaunched - see bt_handler for the
+// same relaunch-vs-live-event distinction elsewhere on this face.
+static void check_battery_alert(BatteryChargeState bat) {
+  bool low = !bat.is_charging && s_batt_low_pct > 0 && bat.charge_percent <= s_batt_low_pct;
+  bool high = bat.is_charging && s_batt_high_pct < 100 && bat.charge_percent >= s_batt_high_pct;
+
+  if (low && !s_batt_low_alerted) {
+    s_batt_low_alerted = true;
+    s_batt_flash_tick = 1;
+    if (s_batt_sound) { play_battery_alert_cue(); }
+    kick_anim();
+  } else if (!low) {
+    s_batt_low_alerted = false;
+  }
+
+  if (high && !s_batt_high_alerted) {
+    s_batt_high_alerted = true;
+    s_batt_flash_tick = 1;
+    if (s_batt_sound) { play_battery_alert_cue(); }
+    kick_anim();
+  } else if (!high) {
+    s_batt_high_alerted = false;
+  }
+}
+
+static void battery_handler(BatteryChargeState bat) {
+  check_battery_alert(bat);
   layer_mark_dirty(s_top_layer);
 }
 
@@ -982,6 +1100,10 @@ static void window_unload(Window *window) {
 static void load_persisted(void) {
   s_show = persist_exists(PK_SHOW) ? persist_read_int(PK_SHOW) : SHOW_ALL;
   s_light = persist_exists(PK_THEME) ? persist_read_int(PK_THEME) != 0 : false;
+  s_batt_low_pct = persist_exists(PK_BATT_LOW) ? persist_read_int(PK_BATT_LOW) : 20;
+  s_batt_high_pct = persist_exists(PK_BATT_HIGH) ? persist_read_int(PK_BATT_HIGH) : 80;
+  s_batt_sound = persist_exists(PK_BATT_SOUND) ? persist_read_int(PK_BATT_SOUND) != 0 : true;
+  s_batt_volume = persist_exists(PK_BATT_VOLUME) ? persist_read_int(PK_BATT_VOLUME) : 80;
   if (!persist_exists(PK_TOTAL)) { return; }
   s_done = persist_read_int(PK_DONE);
   s_total = persist_read_int(PK_TOTAL);
@@ -1002,6 +1124,12 @@ static void load_persisted(void) {
   s_status = 0; // show cached data until the fresh sync lands
   s_ring_target = (s_total > 0) ? (s_done * 1000 / s_total) : 0;
   if (s_ring_target > 1000) { s_ring_target = 1000; }
+  // Cached data shows immediately at rest, not swept up from empty - the
+  // watchface relaunches fresh every time you return to it (the OS unloads
+  // it like any other app), so sweeping on every launch replayed the fill
+  // on every single glance at the watch. A genuine change still sweeps: once
+  // a fresh sync lands, inbox_received resets s_ring_shown for a real refresh.
+  s_ring_shown = s_ring_target;
 }
 
 static void save_persisted(void) {
@@ -1022,6 +1150,10 @@ static void save_persisted(void) {
   persist_write_int(PK_LAST_OK, (int)s_last_ok);
   persist_write_int(PK_SHOW, s_show);
   persist_write_int(PK_THEME, s_light ? 1 : 0);
+  persist_write_int(PK_BATT_LOW, s_batt_low_pct);
+  persist_write_int(PK_BATT_HIGH, s_batt_high_pct);
+  persist_write_int(PK_BATT_SOUND, s_batt_sound ? 1 : 0);
+  persist_write_int(PK_BATT_VOLUME, s_batt_volume);
 }
 
 static void init(void) {
@@ -1035,7 +1167,7 @@ static void init(void) {
 
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
   accel_tap_service_subscribe(tap_handler);
-  battery_state_service_subscribe(NULL);
+  battery_state_service_subscribe(battery_handler);
   connection_service_subscribe((ConnectionHandlers) { .pebble_app_connection_handler = bt_handler });
   s_bt = connection_service_peek_pebble_app_connection();
 
@@ -1043,7 +1175,7 @@ static void init(void) {
   app_message_open(512, 64);
 
 #if defined(PBL_HEALTH)
-  health_service_set_heart_rate_sample_period(600);  // a fresh HR reading ~every 10 min
+  apply_hr_sampling();  // a fresh HR reading ~every 10 min, only if SHOW_HR is on
 #endif
 }
 

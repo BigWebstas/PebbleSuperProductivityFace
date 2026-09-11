@@ -49,7 +49,11 @@
       "FACE_TRACKING_ELAPSED_S",
       "FACE_TRACKING_OVER_S",
       "FACE_SHOW_MASK",
-      "FACE_THEME"
+      "FACE_THEME",
+      "FACE_BATT_LOW_PCT",
+      "FACE_BATT_HIGH_PCT",
+      "FACE_BATT_SOUND",
+      "FACE_BATT_VOLUME_PCT"
     ]
   }
 }
