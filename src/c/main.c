@@ -105,6 +105,7 @@ static GColor s_status_color;
 // animation state (one shared 33ms timer, self-stopping)
 #define ANIM_STEP_MS 33
 #define RING_STEP 20           // per-mille the shown ring moves per tick
+#define BATT_STEP 2            // percent the shown battery gauge moves per tick
 // How far the progress ring is inset from the layer edge. Bumped up so the
 // arc's bottom clears the habits box in the lower strip; round screens need
 // more because the ring can't lean on absent corners.
@@ -114,6 +115,10 @@ static GColor s_status_color;
 #define MARQUEE_STEP 2
 #define MARQUEE_BUDGET 240     // anim ticks a fresh line marquees before it parks (~8s)
 #define TIME_ROLL_TICKS 6      // minute vertical-roll length
+#define STEPS_ROLL_TICKS 6     // steps-count vertical-roll length
+#define TASKS_ROLL_TICKS 6     // tasks-left vertical-roll length
+#define HR_ROLL_TICKS 6        // heart-rate vertical-roll length
+#define POP_TICKS 4            // habits-complete checkmark pop length
 #define SPARK_TICKS 8          // sparkline grow-in length
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
@@ -131,6 +136,14 @@ static int s_marquee_budget = 0;      // anim ticks left before the marquee park
 static char s_marquee_last[96] = "";  // the line the current budget was granted for
 static int s_time_roll_tick = 0;    // 0 = idle
 static char s_time_prev[8] = "";
+static int s_steps_roll_tick = 0;    // 0 = idle (steps-count vertical roll)
+static char s_steps_prev[16] = "";
+static int s_tasks_roll_tick = 0;    // 0 = idle (tasks-left vertical roll)
+static char s_tasks_prev[16] = "";
+static int s_hr_roll_tick = 0;       // 0 = idle (heart-rate vertical roll)
+static char s_hr_prev[8] = "";
+static int s_hab_pop_tick = 0;       // 0 = idle (habits-complete checkmark pop)
+static int s_batt_shown = -1;        // -1 = not yet initialized (snap on first read)
 static int s_spark_tick = 0;         // 0 = idle (bars at full height)
 static int s_beat_tick = 0;          // 0 = idle (heart-rate thump)
 static int s_bt_flash = 0;           // 0 = idle (phone-reconnected underline)
@@ -143,6 +156,9 @@ static void anim_tick(void *data);
 static void render_status(void);
 static void render_status_stats(void);
 static void time_update_proc(Layer *layer, GContext *ctx);
+static void format_tasks_left(char *out, size_t n, int done, int total);
+static void draw_rolled(GContext *ctx, GFont f, GRect box, const char *text,
+                         const char *prev, int roll_tick, int roll_ticks, GTextAlignment al);
 
 static void kick_anim(void) {
   if (!s_anim_timer) {
@@ -162,7 +178,10 @@ static GColor theme_secondary(void) {
   return PBL_IF_COLOR_ELSE(s_light ? GColorBlack : GColorLightGray, theme_fg());
 }
 static GColor theme_track(void) {
-  return PBL_IF_COLOR_ELSE(s_light ? GColorLightGray : GColorFromRGB(42, 42, 42),
+  // GColorFromRGB(42,42,42) quantizes to Pebble's nearest palette level,
+  // which rounds down to pure black - invisible against a black background.
+  // GColorDarkGray (85,85,85) is an exact palette value, so it stays visible.
+  return PBL_IF_COLOR_ELSE(s_light ? GColorLightGray : GColorDarkGray,
                             theme_fg());
 }
 static GColor theme_mark(void) {
@@ -471,6 +490,41 @@ static void anim_tick(void *data) {
     else { more = true; }
     layer_mark_dirty(s_time_layer_l);
   }
+  if (s_steps_roll_tick > 0) {
+    s_steps_roll_tick++;
+    if (s_steps_roll_tick > STEPS_ROLL_TICKS) { s_steps_roll_tick = 0; s_steps_prev[0] = '\0'; }
+    else { more = true; }
+    layer_mark_dirty(s_top_layer);
+  }
+  if (s_tasks_roll_tick > 0) {
+    s_tasks_roll_tick++;
+    if (s_tasks_roll_tick > TASKS_ROLL_TICKS) { s_tasks_roll_tick = 0; s_tasks_prev[0] = '\0'; }
+    else { more = true; }
+    if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
+  if (s_hr_roll_tick > 0) {
+    s_hr_roll_tick++;
+    if (s_hr_roll_tick > HR_ROLL_TICKS) { s_hr_roll_tick = 0; s_hr_prev[0] = '\0'; }
+    else { more = true; }
+    if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
+  if (s_batt_shown >= 0) {
+    BatteryChargeState bat = battery_state_service_peek();
+    if (s_batt_shown != bat.charge_percent) {
+      int d = bat.charge_percent - s_batt_shown;
+      int step = d > 0 ? BATT_STEP : -BATT_STEP;
+      if ((d > 0 && step > d) || (d < 0 && step < d)) { step = d; }
+      s_batt_shown += step;
+      layer_mark_dirty(s_top_layer);
+      more = true;
+    }
+  }
+  if (s_hab_pop_tick > 0) {
+    s_hab_pop_tick++;
+    if (s_hab_pop_tick > POP_TICKS) { s_hab_pop_tick = 0; }
+    else { more = true; }
+    if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
   if (s_spark_tick > 0) {
     s_spark_tick++;
     if (s_spark_tick > SPARK_TICKS) { s_spark_tick = 0; }
@@ -658,8 +712,8 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     char hb[8];
     snprintf(hb, sizeof(hb), "%d", s_hr);
     graphics_context_set_text_color(ctx, hc);
-    graphics_draw_text(ctx, hb, f18, GRect(lx + 12, 0, 40, 18),
-                       GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    draw_rolled(ctx, f18, GRect(lx + 12, 0, 40, 18), hb, s_hr_prev,
+               s_hr_roll_tick, HR_ROLL_TICKS, GTextAlignmentLeft);
   }
 
   // habits, centre: a small check + today's done / total. The text goes green
@@ -674,11 +728,14 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
         rb, f18, GRect(0, 0, 60, 18), GTextOverflowModeFill, GTextAlignmentLeft).w;
     int gw = 12;  // check glyph + gap
     int x0 = b.size.w / 2 - (gw + textw) / 2;
-    int gy = 4;
+    int gy = 6;
+    // pop the checkmark a size bigger right when the last habit completes -
+    // same binary size-bump idiom as the heart rate's beat_tick thump above.
+    int pop = (s_hab_pop_tick >= 1 && s_hab_pop_tick <= POP_TICKS) ? 1 : 0;
     graphics_context_set_stroke_color(ctx, hcol);
-    graphics_context_set_stroke_width(ctx, 2);
-    graphics_draw_line(ctx, GPoint(x0, gy + 4), GPoint(x0 + 3, gy + 7));
-    graphics_draw_line(ctx, GPoint(x0 + 3, gy + 7), GPoint(x0 + 8, gy + 1));
+    graphics_context_set_stroke_width(ctx, 2 + pop);
+    graphics_draw_line(ctx, GPoint(x0 - pop, gy + 4), GPoint(x0 + 3, gy + 7 + pop));
+    graphics_draw_line(ctx, GPoint(x0 + 3, gy + 7 + pop), GPoint(x0 + 8 + pop, gy + 1 - pop));
     graphics_context_set_stroke_width(ctx, 1);
     graphics_context_set_text_color(ctx, hcol);
     graphics_draw_text(ctx, rb, f18, GRect(x0 + gw, 0, textw + 4, 18),
@@ -688,43 +745,116 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
   if ((s_show & SHOW_TASKS) && s_total > 0) {
     int left = s_total - s_done;
     char tb[16];
-    if (left <= 0) { snprintf(tb, sizeof(tb), "all done"); }
-    else { snprintf(tb, sizeof(tb), "%d left", left); }
+    format_tasks_left(tb, sizeof(tb), s_done, s_total);
     graphics_context_set_text_color(ctx,
         dim ? GColorDarkGray : (left <= 0 ? theme_green() : theme_secondary()));
-    graphics_draw_text(ctx, tb, f18, GRect(b.size.w - rx - 80, 0, 80, 18),
-                       GTextOverflowModeFill, GTextAlignmentRight, NULL);
+    draw_rolled(ctx, f18, GRect(b.size.w - rx - 80, 0, 80, 18), tb, s_tasks_prev,
+               s_tasks_roll_tick, TASKS_ROLL_TICKS, GTextAlignmentRight);
   }
 }
 
-static void draw_comma_int(GContext *ctx, GFont f, GRect box, int v, GTextAlignment al) {
-  char raw[12], out[16];
+static void format_comma_int(char *out, size_t n, int v) {
+  char raw[12];
   snprintf(raw, sizeof(raw), "%d", v < 0 ? 0 : v);
   int len = strlen(raw), o = 0;
-  for (int i = 0; i < len; i++) {
+  for (int i = 0; i < len && (size_t)(o + 1) < n; i++) {
     if (i > 0 && (len - i) % 3 == 0) { out[o++] = ','; }
     out[o++] = raw[i];
   }
   out[o] = '\0';
-  graphics_draw_text(ctx, out, f, box, GTextOverflowModeFill, al, NULL);
+}
+
+static void format_tasks_left(char *out, size_t n, int done, int total) {
+  if (total <= 0) { out[0] = '\0'; return; }
+  int left = total - done;
+  if (left <= 0) { snprintf(out, n, "all done"); }
+  else { snprintf(out, n, "%d left", left); }
+}
+
+// Arbitrary text with a per-character vertical roll on change - same
+// technique as time_update_proc's minute roll, generalized to any string and
+// alignment so both the steps count and the tasks-left line can share it.
+// `prev` empty (or too long to bother with) just draws plain, no roll.
+static void draw_rolled(GContext *ctx, GFont f, GRect box, const char *text,
+                         const char *prev, int roll_tick, int roll_ticks, GTextAlignment al) {
+  int n = strlen(text);
+  bool rolling = roll_tick > 0 && prev[0] && n <= 11 && (int)strlen(prev) <= 11;
+  if (!rolling) {
+    graphics_draw_text(ctx, text, f, box, GTextOverflowModeFill, al, NULL);
+    return;
+  }
+
+  int span = box.size.h + 8;
+  int pn = strlen(prev);
+  int w[12], total = 0;
+  for (int i = 0; i < n; i++) {
+    char one[2] = { text[i], '\0' };
+    GSize sz = graphics_text_layout_get_content_size(
+        one, f, GRect(0, 0, 80, span), GTextOverflowModeFill, GTextAlignmentLeft);
+    w[i] = sz.w;
+    total += w[i];
+  }
+  int p = roll_tick * 1000 / roll_ticks;
+  if (p > 1000) { p = 1000; }
+  int roll = span * p / 1000;
+
+  int x = box.origin.x;
+  if (al == GTextAlignmentRight) { x = box.origin.x + box.size.w - total; }
+  else if (al == GTextAlignmentCenter) { x = box.origin.x + (box.size.w - total) / 2; }
+
+  for (int i = 0; i < n; i++) {
+    char cur[2] = { text[i], '\0' };
+    bool changed = pn != n || i >= pn || prev[i] != text[i];
+    if (changed) {
+      char old[2] = { (i < pn ? prev[i] : ' '), '\0' };
+      graphics_draw_text(ctx, old, f, GRect(x, box.origin.y - roll, w[i] + 3, span),
+                         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+      graphics_draw_text(ctx, cur, f, GRect(x, box.origin.y - roll + span, w[i] + 3, span),
+                         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    } else {
+      graphics_draw_text(ctx, cur, f, GRect(x, box.origin.y, w[i] + 3, span),
+                         GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    }
+    x += w[i];
+  }
+}
+
+// Comma-grouped int with a vertical roll on change - see draw_rolled().
+static void draw_comma_int(GContext *ctx, GFont f, GRect box, int v, GTextAlignment al) {
+  char out[16];
+  format_comma_int(out, sizeof(out), v);
+  draw_rolled(ctx, f, box, out, s_steps_prev, s_steps_roll_tick, STEPS_ROLL_TICKS, al);
 }
 
 static void top_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   GColor fg = theme_fg();
+  // Clear first: elements here (steps count, "no phone") vary in width
+  // between redraws, and without this, narrower new text leaves stale
+  // pixels from the wider previous draw flanking it.
+  graphics_context_set_fill_color(ctx, theme_bg());
+  graphics_fill_rect(ctx, b, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
 
-  // steps, left
+  // steps, left: a small shoe glyph + comma-grouped count
 #if defined(PBL_HEALTH)
   if ((s_show & SHOW_STEPS) && s_steps > 0) {
+    int sx = 6, sy = 6;
+    graphics_context_set_fill_color(ctx, fg);
+    graphics_fill_rect(ctx, GRect(sx + 2, sy + 3, 8, 2), 0, GCornerNone); // upper
+    graphics_fill_rect(ctx, GRect(sx + 1, sy + 5, 10, 2), 0, GCornerNone); // body
+    graphics_fill_circle(ctx, GPoint(sx + 10, sy + 6), 3);                // toe
+    graphics_fill_circle(ctx, GPoint(sx + 2, sy + 7), 2);                 // heel
+    graphics_fill_rect(ctx, GRect(sx, sy + 8, 12, 1), 0, GCornerNone);    // sole
     draw_comma_int(ctx, fonts_get_system_font(FONT_KEY_GOTHIC_18),
-                   GRect(6, 0, b.size.w / 2, 18), s_steps, GTextAlignmentLeft);
+                   GRect(sx + 15, 0, b.size.w / 2 - 15, 18), s_steps, GTextAlignmentLeft);
   }
 #endif
 
   // battery gauge, right - green / amber / red by level, cyan while charging
   if (s_show & SHOW_BATTERY) {
     BatteryChargeState bat = battery_state_service_peek();
+    if (s_batt_shown < 0) { s_batt_shown = bat.charge_percent; }  // snap on first draw
     bool low = bat.charge_percent <= 10 && !bat.is_charging;
     int bw = 24, bh = 11;
     int px = b.size.w - 6 - bw - 2, py = 4;
@@ -736,7 +866,9 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
               : bat.charge_percent <= 25 ? PBL_IF_COLOR_ELSE(GColorChromeYellow, theme_fg())
               : PBL_IF_COLOR_ELSE(GColorGreen, theme_fg());
     graphics_context_set_fill_color(ctx, bc);
-    graphics_fill_rect(ctx, GRect(px + 2, py + 2, bat.charge_percent * (bw - 4) / 100, bh - 4), 0, GCornerNone);
+    // Fill eases toward the real level via s_batt_shown (anim_tick); colour
+    // and the low-battery pip below react to the real level immediately.
+    graphics_fill_rect(ctx, GRect(px + 2, py + 2, s_batt_shown * (bw - 4) / 100, bh - 4), 0, GCornerNone);
     if (low) {  // an alert pip left of the gauge
       graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
       graphics_fill_rect(ctx, GRect(px - 7, py, 3, bh), 0, GCornerNone);
@@ -754,8 +886,8 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
   if (!s_bt) {
     graphics_context_set_text_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
     graphics_draw_text(ctx, "no phone", fonts_get_system_font(FONT_KEY_GOTHIC_14),
-                       GRect(b.size.w / 2, 0, b.size.w / 2 - 30, 16),
-                       GTextOverflowModeFill, GTextAlignmentRight, NULL);
+                       GRect(b.size.w / 2 - 45, 0, 90, 16),
+                       GTextOverflowModeFill, GTextAlignmentCenter, NULL);
   }
 
   // brief green underline when the phone has just reconnected
@@ -800,13 +932,28 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   // hidden, so a face with steps or HR toggled off doesn't keep paying for
   // health_service reads nothing on screen will show.
   if ((units & MINUTE_UNIT) && (s_show & SHOW_STEPS)) {
-    s_steps = (int)health_service_sum_today(HealthMetricStepCount);
+    int newsteps = (int)health_service_sum_today(HealthMetricStepCount);
+    if (newsteps != s_steps) {
+      if (s_steps > 0) {   // roll - but not the first read after launch
+        format_comma_int(s_steps_prev, sizeof(s_steps_prev), s_steps);
+        s_steps_roll_tick = 1;
+        kick_anim();
+      }
+      s_steps = newsteps;
+    }
   }
   if ((units & MINUTE_UNIT) && (s_show & SHOW_HR)) {
     HealthValue bpm = health_service_peek_current_value(HealthMetricHeartRateBPM);
     int newhr = bpm > 0 ? (int)bpm : 0;   // 0 when no recent reading / no sensor
     if (newhr != s_hr) {
-      if (newhr > 0) { s_beat_tick = 1; kick_anim(); }  // thump on a fresh reading
+      if (newhr > 0) {
+        s_beat_tick = 1;  // thump on a fresh reading
+        if (s_hr > 0) {   // roll digit-to-digit; a from-nothing reading just thumps in
+          snprintf(s_hr_prev, sizeof(s_hr_prev), "%d", s_hr);
+          s_hr_roll_tick = 1;
+        }
+        kick_anim();
+      }
       s_hr = newhr;
       if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
     }
@@ -884,9 +1031,21 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   if ((t = dict_find(iter, KEY_BATT_SOUND))) { s_batt_sound = t->value->int32 != 0; }
   if ((t = dict_find(iter, KEY_BATT_VOLUME))) { s_batt_volume = t->value->int32; }
   bool got_done = false, got_total = false;
+  char tasks_prev_fmt[16];
+  format_tasks_left(tasks_prev_fmt, sizeof(tasks_prev_fmt), s_done, s_total);
   if ((t = dict_find(iter, KEY_STATUS))) { s_status = t->value->int32; }
   if ((t = dict_find(iter, KEY_DONE)))   { s_done = t->value->int32; got_done = true; }
   if ((t = dict_find(iter, KEY_TOTAL)))  { s_total = t->value->int32; got_total = true; }
+  if ((got_done || got_total) && tasks_prev_fmt[0]) {
+    char tasks_new_fmt[16];
+    format_tasks_left(tasks_new_fmt, sizeof(tasks_new_fmt), s_done, s_total);
+    if (strcmp(tasks_prev_fmt, tasks_new_fmt) != 0) {
+      strncpy(s_tasks_prev, tasks_prev_fmt, sizeof(s_tasks_prev));
+      s_tasks_prev[sizeof(s_tasks_prev) - 1] = '\0';
+      s_tasks_roll_tick = 1;
+      kick_anim();
+    }
+  }
   if ((t = dict_find(iter, KEY_WORKED_MIN))) { s_worked_min = t->value->int32; }
   if ((t = dict_find(iter, KEY_EST_MIN)))    { s_est_min = t->value->int32; }
   if ((t = dict_find(iter, KEY_NEXT_MIN)))   { s_next_min = t->value->int32; }
@@ -894,8 +1053,13 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
     strncpy(s_next_title, t->value->cstring, sizeof(s_next_title));
     s_next_title[sizeof(s_next_title) - 1] = '\0';
   }
+  bool hab_was_all = s_hab_total > 0 && s_hab_done >= s_hab_total;
   if ((t = dict_find(iter, KEY_HABITS_DONE)))  { s_hab_done = t->value->int32; }
   if ((t = dict_find(iter, KEY_HABITS_TOTAL))) { s_hab_total = t->value->int32; }
+  if (!hab_was_all && s_hab_total > 0 && s_hab_done >= s_hab_total) {
+    s_hab_pop_tick = 1;
+    kick_anim();
+  }
   if ((t = dict_find(iter, KEY_HABIT_STREAK))) { s_hab_streak = t->value->int32; }
   if ((t = dict_find(iter, KEY_HABIT_TITLE)))  {
     strncpy(s_hab_title, t->value->cstring, sizeof(s_hab_title));
@@ -1027,6 +1191,7 @@ static void check_battery_alert(BatteryChargeState bat) {
 
 static void battery_handler(BatteryChargeState bat) {
   check_battery_alert(bat);
+  if (s_batt_shown >= 0 && s_batt_shown != bat.charge_percent) { kick_anim(); }
   layer_mark_dirty(s_top_layer);
 }
 
@@ -1045,10 +1210,12 @@ static void window_load(Window *window) {
 
   s_top_layer = layer_create(GRect(0, 2, b.size.w, 18));
   layer_set_update_proc(s_top_layer, top_update_proc);
+  layer_set_clips(s_top_layer, true);  // the steps-count roll overshoots vertically
   layer_add_child(root, s_top_layer);
 
   s_lower_layer = layer_create(GRect(0, b.size.h - 22, b.size.w, 22));
   layer_set_update_proc(s_lower_layer, lower_update_proc);
+  layer_set_clips(s_lower_layer, true);  // the tasks-left roll overshoots vertically
   layer_add_child(root, s_lower_layer);
 
   s_time_layer_l = layer_create(GRect(0, cy - 42, b.size.w, 46));
