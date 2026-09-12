@@ -296,6 +296,28 @@ function doSync() {
 var presenceClient = null;
 var presenceToken = null;
 
+// The socket is otherwise held open 24/7 once enabled, which is the actual
+// phone-battery cost of this opt-in feature. Close it after a stretch with
+// nothing tracked (by us or anyone else) and only reopen it on the app's own
+// sync cadence or a wrist tap - a remote tracking start may take up to that
+// long to show up, traded for not holding a radio connection all day.
+var PRESENCE_IDLE_MS = 3 * 60 * 1000;
+var presenceLastActivityAt = 0;
+
+function presenceConnect() {
+  if (!presenceClient) { return; }
+  presenceClient.connect();
+  presenceLastActivityAt = Date.now();
+}
+
+function presenceIdleCheck() {
+  if (!presenceClient || !presenceClient.isConnected()) { return; }
+  if (trackedView || presenceClient.isBroadcasting()) { return; }
+  if (Date.now() - presenceLastActivityAt >= PRESENCE_IDLE_MS) {
+    presenceClient.disconnect();
+  }
+}
+
 function getClientId() {
   var id = localStorage.getItem('spf_client_id');
   if (!id) {
@@ -326,15 +348,20 @@ function applyPresence(config) {
       log: function (m) { console.log('[spf presence] ' + m); },
     });
     presenceClient.onState(function (view) {
+      presenceLastActivityAt = Date.now();
       if (view.state !== 'tracking') { trackedView = null; pushTracking(); return; }
       if (view.opaque) { trackedView = { opaque: true }; pushTracking(); return; }
       trackedView = { sinceTs: view.sinceTs || Date.now(), taskId: view.taskId };
       pushTracking();
     });
-    presenceClient.onCleared(function () { trackedView = null; pushTracking(); });
+    presenceClient.onCleared(function () {
+      presenceLastActivityAt = Date.now();
+      trackedView = null;
+      pushTracking();
+    });
     presenceClient.onOffline(function () { /* keep showing the last view */ });
   }
-  presenceClient.connect();
+  presenceConnect();
 }
 
 // ---------- blood glucose (personal feature, this branch only) ----------
@@ -401,7 +428,11 @@ Pebble.addEventListener('ready', function () {
   fetchGlucose();
   setInterval(fetchGlucose, GLUCOSE_POLL_MS);
   setInterval(function () {
-    if (Date.now() - lastPollAt >= POLL_MS) { doSync(); }
+    if (Date.now() - lastPollAt >= POLL_MS) {
+      doSync();
+      presenceConnect();
+    }
+    presenceIdleCheck();
   }, 60 * 1000);
 });
 
@@ -415,7 +446,10 @@ Pebble.addEventListener('appmessage', function (e) {
     } else {
       try { pushFaceData(loadState()); } catch (err) {}
     }
-    if (presenceClient) { pushTracking(); }
+    if (presenceClient) {
+      presenceConnect(); // a tap means someone's looking - worth the radio hit
+      pushTracking();
+    }
   }
 });
 
