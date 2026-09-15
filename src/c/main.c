@@ -853,6 +853,15 @@ static void draw_rolled(GContext *ctx, GFont f, GRect box, const char *text,
   for (int i = 0; i < n; i++) {
     char cur[2] = { text[i], '\0' };
     bool changed = pn != n || i >= pn || prev[i] != text[i];
+    // Each cell is w[i]+3 wide, not w[i] - the +3 gives a glyph's own
+    // antialiased right edge room so GTextOverflowModeFill doesn't clip it.
+    // That means neighbouring cells overlap by 3px; without re-erasing this
+    // cell first, a previous character's edge pixels left in that overlap
+    // survive as a stray sliver beside the one drawn here. (fill_color is a
+    // separate context field from text_color, so this doesn't disturb it.)
+    graphics_context_set_fill_color(ctx, theme_bg());
+    graphics_fill_rect(ctx, GRect(x, box.origin.y - roll, w[i] + 3, 2 * span),
+                       0, GCornerNone);
     if (changed) {
       char old[2] = { (i < pn ? prev[i] : ' '), '\0' };
       graphics_draw_text(ctx, old, f, GRect(x, box.origin.y - roll, w[i] + 3, span),
