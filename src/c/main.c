@@ -744,7 +744,8 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     graphics_fill_rect(ctx, GRect(lx + 2 - sw, hy + 6 + sw, 4 + 2 * sw, 2), 0, GCornerNone);
     char hb[8];
     snprintf(hb, sizeof(hb), "%d", s_hr);
-    graphics_context_set_text_color(ctx, hc);
+    GColor htc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorMelon, theme_fg());
+    graphics_context_set_text_color(ctx, htc);
     draw_rolled(ctx, f18, GRect(lx + 12, 0, 40, 18), hb, s_hr_prev,
                s_hr_roll_tick, HR_ROLL_TICKS, GTextAlignmentLeft);
   }
@@ -932,16 +933,16 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
 
-  // steps, left: a small shoe glyph + comma-grouped count
+  // steps, left: a small footprint glyph + comma-grouped count
 #if defined(PBL_HEALTH)
   if ((s_show & SHOW_STEPS) && s_steps > 0) {
     int sx = 6, sy = 6;
     graphics_context_set_fill_color(ctx, fg);
-    graphics_fill_rect(ctx, GRect(sx + 2, sy + 3, 8, 2), 0, GCornerNone); // upper
-    graphics_fill_rect(ctx, GRect(sx + 1, sy + 5, 10, 2), 0, GCornerNone); // body
-    graphics_fill_circle(ctx, GPoint(sx + 10, sy + 6), 3);                // toe
-    graphics_fill_circle(ctx, GPoint(sx + 2, sy + 7), 2);                 // heel
-    graphics_fill_rect(ctx, GRect(sx, sy + 8, 12, 1), 0, GCornerNone);    // sole
+    graphics_fill_circle(ctx, GPoint(sx + 3, sy - 1), 1); // toes
+    graphics_fill_circle(ctx, GPoint(sx + 6, sy - 2), 1);
+    graphics_fill_circle(ctx, GPoint(sx + 9, sy - 1), 1);
+    graphics_fill_circle(ctx, GPoint(sx + 6, sy + 3), 4); // ball of foot
+    graphics_fill_circle(ctx, GPoint(sx + 4, sy + 8), 3); // heel, offset to curve the arch
     draw_comma_int(ctx, fonts_get_system_font(FONT_KEY_GOTHIC_18),
                    GRect(sx + 15, 0, b.size.w / 2 - 15, 18), s_steps, GTextAlignmentLeft);
   }
@@ -1012,8 +1013,8 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     // Blink a highlight box around the reading right after it crosses into
     // the low or high zone - same cadence as the battery gauge's blink.
     if (s_glucose_flash_tick > 0 && (s_glucose_flash_tick / 5) % 2 == 0) {
-      graphics_context_set_stroke_color(ctx, gcol);
-      graphics_draw_rect(ctx, GRect(x0 - 2, -3, iw + textw + 4, 24));
+      graphics_context_set_stroke_color(ctx, theme_bg());
+      graphics_draw_rect(ctx, GRect(x0 - 2, 0, iw + textw + 4, 18));
     }
   }
 
