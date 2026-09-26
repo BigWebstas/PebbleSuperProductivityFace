@@ -137,6 +137,7 @@ static GColor s_status_color;
 #define GLUCOSE_ROLL_TICKS 6   // glucose-reading vertical-roll length
 #define HR_ROLL_TICKS 6        // heart-rate vertical-roll length
 #define POP_TICKS 4            // habits-complete checkmark pop length
+#define SPARK_TICKS 8          // sparkline grow-in length
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
 #define BATT_FLASH_TICKS 40    // battery-threshold gauge blink length (~1.3s)
@@ -164,6 +165,7 @@ static int s_hr_roll_tick = 0;       // 0 = idle (heart-rate vertical roll)
 static char s_hr_prev[8] = "";
 static int s_hab_pop_tick = 0;       // 0 = idle (habits-complete checkmark pop)
 static int s_batt_shown = -1;        // -1 = not yet initialized (snap on first read)
+static int s_spark_tick = 0;         // 0 = idle (bars at full height)
 static int s_beat_tick = 0;          // 0 = idle (heart-rate thump)
 static int s_bt_flash = 0;           // 0 = idle (phone-reconnected underline)
 static int s_intro_tick = 0;         // 0 = idle
@@ -550,6 +552,12 @@ static void anim_tick(void *data) {
     else { more = true; }
     if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
   }
+  if (s_spark_tick > 0) {
+    s_spark_tick++;
+    if (s_spark_tick > SPARK_TICKS) { s_spark_tick = 0; }
+    else { more = true; }
+    layer_mark_dirty(s_ring_layer);
+  }
   if (s_beat_tick > 0) {
     s_beat_tick++;
     if (s_beat_tick > BEAT_TICKS) { s_beat_tick = 0; }
@@ -684,17 +692,23 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_stroke_width(ctx, 1);
   }
 
-  // tasks remaining today, centred just below the digits - done/total
-  if ((s_show & SHOW_SPARK) && s_total > 0) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%d/%d", s_done, s_total);
-    GColor col = dim ? GColorDarkGray
-        : (complete ? PBL_IF_COLOR_ELSE(GColorGreen, theme_fg())
+  // week sparkline, centred, just below the digits
+  if (s_show & SHOW_SPARK) {
+    int base = b.size.h - 40;
+    int maxv = 1;
+    for (int i = 0; i < 7; i++) { if (s_week[i] > maxv) { maxv = s_week[i]; } }
+    int bw = 6, gap = 3, total_w = 7 * bw + 6 * gap;
+    int x0 = (b.size.w - total_w) / 2;
+    for (int i = 0; i < 7; i++) {
+      int hh = s_week[i] * 12 / maxv;
+      if (s_week[i] > 0 && hh < 2) { hh = 2; }
+      if (s_spark_tick > 0) { hh = hh * s_spark_tick / SPARK_TICKS; }  // grow-in
+      GColor bar = dim ? GColorDarkGray
+          : (i == 6 ? PBL_IF_COLOR_ELSE(GColorGreen, theme_fg())
                     : PBL_IF_COLOR_ELSE(GColorFromRGB(60, 110, 150), theme_fg()));
-    graphics_context_set_text_color(ctx, col);
-    graphics_draw_text(ctx, buf, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-                       GRect(0, b.size.h - 58, b.size.w, 20),
-                       GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+      graphics_context_set_fill_color(ctx, bar);
+      graphics_fill_rect(ctx, GRect(x0 + i * (bw + gap), base - hh, bw, hh), 0, GCornerNone);
+    }
   }
 
   // Quiet Time: a crescent moon centred in the gap between the ring and the
@@ -1201,10 +1215,13 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
     strncpy(s_hab_title, t->value->cstring, sizeof(s_hab_title));
     s_hab_title[sizeof(s_hab_title) - 1] = '\0';
   }
-  // No longer rendered (the ring shows a tasks-remaining count here instead
-  // of the old week sparkline) - still parsed and persisted so PK_WEEK's
-  // slot in the persist-key enum doesn't need renumbering.
-  if ((t = dict_find(iter, KEY_WEEK_CSV))) { parse_week_csv(t->value->cstring); }
+  if ((t = dict_find(iter, KEY_WEEK_CSV))) {
+    int before = 0, after = 0;
+    for (int i = 0; i < 7; i++) { before += s_week[i] * (i + 1); }
+    parse_week_csv(t->value->cstring);
+    for (int i = 0; i < 7; i++) { after += s_week[i] * (i + 1); }
+    if (before != after) { s_spark_tick = 1; }  // grow the bars in
+  }
 
   {
     Tuple *tt = dict_find(iter, KEY_TRACK_TITLE);
@@ -1248,7 +1265,7 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
       }
     }
   }
-  if (s_ring_shown != s_ring_target || s_pulse_tick > 0) { kick_anim(); }
+  if (s_ring_shown != s_ring_target || s_pulse_tick > 0 || s_spark_tick > 0) { kick_anim(); }
 
   render_status();
   layer_mark_dirty(s_ring_layer);
@@ -1381,6 +1398,7 @@ static void window_load(Window *window) {
   tick_handler(localtime(&now), MINUTE_UNIT);
   render_status();
   s_intro_tick = 1;    // launch stagger: ring sweep -> time roll-in -> line slide
+  s_spark_tick = 1;    // ... with the sparkline growing up alongside
   kick_anim();
 }
 

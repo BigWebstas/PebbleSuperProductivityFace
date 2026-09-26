@@ -510,7 +510,7 @@ function configHtml(config) {
     '<label for="showTracking">Show the live-tracked task</label></div>' +
     '<p class="hint">Holds a connection open to show what you\'re tracking right now, with a running timer. Uses noticeably more battery.</p>' +
     '<label>Show on the face</label>' +
-    ck('steps', 'Steps') + ck('battery', 'Battery') + ck('spark', 'Tasks count (done/total)') +
+    ck('steps', 'Steps') + ck('battery', 'Battery') + ck('spark', 'Week sparkline') +
     ck('hr', 'Heart rate') + ck('habits', 'Habits') + ck('tasks', 'Tasks remaining') +
     '<label>Battery health alert</label>' +
     '<p class="hint">Flashes the battery gauge once the level drops to the low % while ' +
