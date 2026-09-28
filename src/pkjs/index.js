@@ -184,12 +184,21 @@ function pushFaceData(state) {
     });
   } catch (e) {}
 
-  // Week: minutes worked per day, [6] = today, as a CSV string.
-  var weekCsv = '0,0,0,0,0,0,0';
+  // Burndown: tasks still open at the end of each hour of the logical day,
+  // [0] = first hour, last = the current hour, as a CSV string. A done task
+  // with no doneOn (or done before today) counts as done from the start.
+  var burnCsv = String(total);
   try {
-    weekCsv = (stats.week || []).map(function (d) {
-      return Math.round((d.ms || 0) / 60000);
-    }).join(',');
+    var dayStart = store.logicalDayStartMs();
+    var hours = Math.min(24, Math.floor((Date.now() - dayStart) / 3600000) + 1);
+    var burn = [];
+    for (var h = 1; h <= hours; h++) {
+      var hourEnd = dayStart + h * 3600000;
+      burn.push(total - today.filter(function (t) {
+        return t.isDone && !(t.doneOn > hourEnd);
+      }).length);
+    }
+    burnCsv = burn.join(',');
   } catch (e) {}
 
   sendToFace({
@@ -205,7 +214,7 @@ function pushFaceData(state) {
     FACE_HABITS_TOTAL: habTotal,
     FACE_HABIT_STREAK: topStreak,
     FACE_HABIT_TITLE: topTitle.slice(0, 20),
-    FACE_WEEK_CSV: weekCsv,
+    FACE_BURN_CSV: burnCsv,
     FACE_SHOW_MASK: showMask(loadConfig()),
     FACE_THEME: themeVal(loadConfig()),
     FACE_BATT_LOW_PCT: battLowVal(loadConfig()),
@@ -224,7 +233,7 @@ function doSync() {
       MSG_TYPE: 0, FACE_STATUS: STATUS_NOT_PAIRED,
       FACE_DONE_TODAY: 0, FACE_TOTAL_TODAY: 0, FACE_WORKED_MIN: 0, FACE_EST_REMAIN_MIN: 0,
       FACE_NEXT_MIN: -1, FACE_NEXT_TITLE: '', FACE_HABITS_DONE: 0, FACE_HABITS_TOTAL: 0,
-      FACE_HABIT_STREAK: 0, FACE_HABIT_TITLE: '', FACE_WEEK_CSV: '0,0,0,0,0,0,0',
+      FACE_HABIT_STREAK: 0, FACE_HABIT_TITLE: '', FACE_BURN_CSV: '',
       FACE_TRACKING_TITLE: '', FACE_TRACKING_ELAPSED_S: 0,
       FACE_SHOW_MASK: showMask(config),
       FACE_THEME: themeVal(config),
@@ -454,7 +463,7 @@ function configHtml(config) {
     '<label for="showTracking">Show the live-tracked task</label></div>' +
     '<p class="hint">Holds a connection open to show what you\'re tracking right now, with a running timer. Uses noticeably more battery.</p>' +
     '<label>Show on the face</label>' +
-    ck('steps', 'Steps') + ck('battery', 'Battery') + ck('spark', 'Week sparkline') +
+    ck('steps', 'Steps') + ck('battery', 'Battery') + ck('spark', 'Daily burndown') +
     ck('hr', 'Heart rate') + ck('habits', 'Habits') + ck('tasks', 'Tasks remaining') +
     '<label>Battery health alert</label>' +
     '<p class="hint">Flashes the battery gauge once the level drops to the low % while ' +

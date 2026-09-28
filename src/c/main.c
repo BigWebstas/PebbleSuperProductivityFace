@@ -21,7 +21,7 @@
 #define KEY_HABITS_TOTAL     MESSAGE_KEY_FACE_HABITS_TOTAL
 #define KEY_HABIT_STREAK     MESSAGE_KEY_FACE_HABIT_STREAK
 #define KEY_HABIT_TITLE      MESSAGE_KEY_FACE_HABIT_TITLE
-#define KEY_WEEK_CSV         MESSAGE_KEY_FACE_WEEK_CSV      // "m0,m1,...,m6" minutes/day, [6]=today
+#define KEY_BURN_CSV         MESSAGE_KEY_FACE_BURN_CSV      // "r0,r1,..." tasks open at the end of each hour of the day, last = now
 #define KEY_TRACK_TITLE      MESSAGE_KEY_FACE_TRACKING_TITLE  // "" = not tracking
 #define KEY_TRACK_ELAPSED_S  MESSAGE_KEY_FACE_TRACKING_ELAPSED_S
 #define KEY_TRACK_OVER_S     MESSAGE_KEY_FACE_TRACKING_OVER_S  // session secs at which it passes its estimate, -1 = n/a
@@ -47,8 +47,8 @@
 
 // persist keys
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
-       PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK, PK_LAST_OK,
-       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME };
+       PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK_UNUSED, PK_LAST_OK,
+       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME, PK_BURN };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
@@ -70,7 +70,9 @@ static int s_next_min = -1;
 static char s_next_title[40] = "";
 static int s_hab_done = 0, s_hab_total = 0, s_hab_streak = 0;
 static char s_hab_title[24] = "";
-static int s_week[7] = {0};
+#define BURN_HOURS 24
+static int s_burn[BURN_HOURS] = {0};  // tasks open at the end of each hour of the logical day
+static int s_burn_n = 0;             // hours so far (last = the current hour)
 static char s_track_title[40] = "";
 static int s_track_elapsed_s = 0;   // as of s_track_received; the tick advances it
 static int s_track_over_s = -1;     // session secs at which the task passes its estimate (-1 = n/a)
@@ -119,7 +121,7 @@ static GColor s_status_color;
 #define TASKS_ROLL_TICKS 6     // tasks-left vertical-roll length
 #define HR_ROLL_TICKS 6        // heart-rate vertical-roll length
 #define POP_TICKS 4            // habits-complete checkmark pop length
-#define SPARK_TICKS 8          // sparkline grow-in length
+#define SPARK_TICKS 8          // burndown draw-in length
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
 #define BATT_FLASH_TICKS 40    // battery-threshold gauge blink length (~1.3s)
@@ -144,7 +146,7 @@ static int s_hr_roll_tick = 0;       // 0 = idle (heart-rate vertical roll)
 static char s_hr_prev[8] = "";
 static int s_hab_pop_tick = 0;       // 0 = idle (habits-complete checkmark pop)
 static int s_batt_shown = -1;        // -1 = not yet initialized (snap on first read)
-static int s_spark_tick = 0;         // 0 = idle (bars at full height)
+static int s_spark_tick = 0;         // 0 = idle (burndown fully drawn)
 static int s_beat_tick = 0;          // 0 = idle (heart-rate thump)
 static int s_bt_flash = 0;           // 0 = idle (phone-reconnected underline)
 static int s_intro_tick = 0;         // 0 = idle
@@ -204,6 +206,11 @@ static GColor theme_moon(void) {
 // theme drops to a darker shade.
 static GColor theme_green(void) {
   return PBL_IF_COLOR_ELSE(s_light ? GColorIslamicGreen : GColorGreen, theme_fg());
+}
+// Heart rate. Pure red is too dark to read on black; SunsetOrange is the
+// lighter red there, plain red stays on white.
+static GColor theme_heart(void) {
+  return PBL_IF_COLOR_ELSE(s_light ? GColorRed : GColorSunsetOrange, theme_fg());
 }
 
 // ---------- helpers ----------
@@ -659,23 +666,35 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_stroke_width(ctx, 1);
   }
 
-  // week sparkline, centred, just below the digits
-  if (s_show & SHOW_SPARK) {
-    int base = b.size.h - 40;
+  // daily burndown, centred, just below the digits: open tasks per hour
+  // across the whole logical day, so the line's length is also "how far
+  // through the day" and its drop is how much got done
+  if ((s_show & SHOW_SPARK) && s_burn_n > 0) {
+    int base = b.size.h - 40, hmax = 12, w = 69;   // 23 hour steps x 3px
+    int x0 = (b.size.w - w) / 2;
     int maxv = 1;
-    for (int i = 0; i < 7; i++) { if (s_week[i] > maxv) { maxv = s_week[i]; } }
-    int bw = 6, gap = 3, total_w = 7 * bw + 6 * gap;
-    int x0 = (b.size.w - total_w) / 2;
-    for (int i = 0; i < 7; i++) {
-      int hh = s_week[i] * 12 / maxv;
-      if (s_week[i] > 0 && hh < 2) { hh = 2; }
-      if (s_spark_tick > 0) { hh = hh * s_spark_tick / SPARK_TICKS; }  // grow-in
-      GColor bar = dim ? GColorDarkGray
-          : (i == 6 ? PBL_IF_COLOR_ELSE(GColorGreen, theme_fg())
-                    : PBL_IF_COLOR_ELSE(GColorFromRGB(60, 110, 150), theme_fg()));
-      graphics_context_set_fill_color(ctx, bar);
-      graphics_fill_rect(ctx, GRect(x0 + i * (bw + gap), base - hh, bw, hh), 0, GCornerNone);
+    for (int i = 0; i < s_burn_n; i++) { if (s_burn[i] > maxv) { maxv = s_burn[i]; } }
+#if defined(PBL_COLOR)
+    if (!dim) {
+      graphics_context_set_stroke_color(ctx, GColorDarkGray);
+      graphics_draw_line(ctx, GPoint(x0, base), GPoint(x0 + w, base));
     }
+#endif
+    int shown = s_burn_n;
+    if (s_spark_tick > 0) { shown = s_burn_n * s_spark_tick / SPARK_TICKS; }  // draw-in
+    if (shown < 1) { shown = 1; }
+    GColor line = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorFromRGB(60, 110, 150), theme_fg());
+    graphics_context_set_stroke_color(ctx, line);
+    graphics_context_set_stroke_width(ctx, 2);
+    GPoint prev = GPoint(x0, base - s_burn[0] * hmax / maxv);
+    for (int i = 1; i < shown; i++) {
+      GPoint pt = GPoint(x0 + i * w / (BURN_HOURS - 1), base - s_burn[i] * hmax / maxv);
+      graphics_draw_line(ctx, prev, pt);
+      prev = pt;
+    }
+    graphics_context_set_stroke_width(ctx, 1);
+    graphics_context_set_fill_color(ctx, dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorGreen, theme_fg()));
+    graphics_fill_circle(ctx, prev, 2);   // now
   }
 
   // Quiet Time: a crescent moon centred in the gap between the ring and the
@@ -701,7 +720,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
 
   // heart rate, left: a tiny heart + BPM (thumps on a fresh reading)
   if ((s_show & SHOW_HR) && s_hr > 0) {
-    GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, theme_fg());
+    GColor hc = dim ? GColorDarkGray : theme_heart();
     int hy = 5;
     int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;
     graphics_context_set_fill_color(ctx, hc);
@@ -989,17 +1008,18 @@ static void request_refresh(void) {
   app_message_outbox_send();
 }
 
-static void parse_week_csv(const char *csv) {
-  for (int i = 0; i < 7; i++) { s_week[i] = 0; }
+static void parse_burn_csv(const char *csv) {
+  for (int i = 0; i < BURN_HOURS; i++) { s_burn[i] = 0; }
   int i = 0, v = 0; bool any = false;
   for (const char *p = csv; ; p++) {
     if (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); any = true; }
     else {
-      if (any && i < 7) { s_week[i++] = v; }
+      if (any && i < BURN_HOURS) { s_burn[i++] = v; }
       v = 0; any = false;
       if (*p == '\0') { break; }
     }
   }
+  s_burn_n = i;
 }
 
 static void inbox_received(DictionaryIterator *iter, void *ctx) {
@@ -1065,12 +1085,13 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
     strncpy(s_hab_title, t->value->cstring, sizeof(s_hab_title));
     s_hab_title[sizeof(s_hab_title) - 1] = '\0';
   }
-  if ((t = dict_find(iter, KEY_WEEK_CSV))) {
-    int before = 0, after = 0;
-    for (int i = 0; i < 7; i++) { before += s_week[i] * (i + 1); }
-    parse_week_csv(t->value->cstring);
-    for (int i = 0; i < 7; i++) { after += s_week[i] * (i + 1); }
-    if (before != after) { s_spark_tick = 1; }  // grow the bars in
+  if ((t = dict_find(iter, KEY_BURN_CSV))) {
+    int before = s_burn_n, after;
+    for (int i = 0; i < s_burn_n; i++) { before += s_burn[i] * (i + 1); }
+    parse_burn_csv(t->value->cstring);
+    after = s_burn_n;
+    for (int i = 0; i < s_burn_n; i++) { after += s_burn[i] * (i + 1); }
+    if (before != after) { s_spark_tick = 1; }  // draw the line in
   }
 
   {
@@ -1282,10 +1303,10 @@ static void load_persisted(void) {
   s_hab_total = persist_read_int(PK_HAB_TOTAL);
   s_hab_streak = persist_read_int(PK_HAB_STREAK);
   persist_read_string(PK_HAB_TITLE, s_hab_title, sizeof(s_hab_title));
-  if (persist_exists(PK_WEEK)) {
-    char csv[64] = "";
-    persist_read_string(PK_WEEK, csv, sizeof(csv));
-    parse_week_csv(csv);
+  if (persist_exists(PK_BURN)) {
+    char csv[BURN_HOURS * 4 + 1] = "";
+    persist_read_string(PK_BURN, csv, sizeof(csv));
+    parse_burn_csv(csv);
   }
   s_last_ok = (time_t)persist_read_int(PK_LAST_OK);
   s_status = 0; // show cached data until the fresh sync lands
@@ -1310,10 +1331,13 @@ static void save_persisted(void) {
   persist_write_int(PK_HAB_TOTAL, s_hab_total);
   persist_write_int(PK_HAB_STREAK, s_hab_streak);
   persist_write_string(PK_HAB_TITLE, s_hab_title);
-  char csv[64];
-  snprintf(csv, sizeof(csv), "%d,%d,%d,%d,%d,%d,%d",
-           s_week[0], s_week[1], s_week[2], s_week[3], s_week[4], s_week[5], s_week[6]);
-  persist_write_string(PK_WEEK, csv);
+  char csv[BURN_HOURS * 4 + 1];
+  int len = 0;
+  csv[0] = '\0';
+  for (int i = 0; i < s_burn_n && len < (int)sizeof(csv); i++) {
+    len += snprintf(csv + len, sizeof(csv) - len, i ? ",%d" : "%d", s_burn[i]);
+  }
+  persist_write_string(PK_BURN, csv);
   persist_write_int(PK_LAST_OK, (int)s_last_ok);
   persist_write_int(PK_SHOW, s_show);
   persist_write_int(PK_THEME, s_light ? 1 : 0);

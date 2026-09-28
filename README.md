@@ -10,7 +10,8 @@ face runs its own trimmed SuperSync client.
   planned tasks.
 - **Steps** (top-left) and a **battery** gauge (top-right); a "no phone" mark
   when Bluetooth drops.
-- A **week sparkline** - minutes worked each of the last 7 days.
+- A **daily burndown** - tasks still open at the end of each hour of the day,
+  drawn across the whole day so its length also shows how far through it you are.
 - **Heart rate** (bottom-left, watches with the sensor), **habits done today**
   (bottom-centre, a small check + `done / total` that goes green when they're
   all done), and **tasks left today** (bottom-right), in a strip along the
@@ -52,7 +53,7 @@ face runs its own trimmed SuperSync client.
 - `Xh left` turns red when the estimate overshoots the end of the day.
 - The tracked-task line turns red with a `!` once the timer passes that
   task's own estimate.
-- Today's sparkline bar is green; the rest are blue. The date is grey.
+- The burndown line is blue with a green dot at "now". The date is grey.
 - The tracked-task line is green.
 
 All motion rides one 33 ms timer that stops itself when nothing's moving.
