@@ -91,6 +91,13 @@ function todayStr() {
   return dateToDateStr(logicalNow());
 }
 
+// Wall-clock ms at which the current logical day began (midnight + rollover).
+function logicalDayStartMs() {
+  var d = logicalNow();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime() + startOfNextDayMin * 60000;
+}
+
 function yesterdayStr() {
   var d = logicalNow();
   d.setDate(d.getDate() - 1);
@@ -188,6 +195,18 @@ function mergeTaskChanges(tasks, id, changes) {
   if (id) {
     tasks[id] = Object.assign({}, tasks[id], changes);
   }
+}
+
+// The real reducer stamps doneOn itself (Date.now() when isDone flips true,
+// cleared when it flips false) - the dispatched changes never carry it. The
+// op's own timestamp is that same moment on the originating client, so
+// stamp it here; the daily burndown on the face depends on it.
+function withDoneOn(changes, op) {
+  if (!changes || !('isDone' in changes) || 'doneOn' in changes) {
+    return changes;
+  }
+  var ts = op && typeof op.timestamp === 'number' ? op.timestamp : undefined;
+  return Object.assign({}, changes, { doneOn: changes.isDone ? ts : undefined });
 }
 
 function deleteTasks(tasks, ids) {
@@ -322,13 +341,13 @@ function applyTaskAction(op, actionPayload, state) {
 
     case '[Task Shared] updateTask':
       if (actionPayload.task) {
-        mergeTaskChanges(tasks, actionPayload.task.id, actionPayload.task.changes);
+        mergeTaskChanges(tasks, actionPayload.task.id, withDoneOn(actionPayload.task.changes, op));
       }
       break;
 
     case '[Task Shared] updateTasks':
       (actionPayload.tasks || []).forEach(function (u) {
-        mergeTaskChanges(tasks, u.id, u.changes);
+        mergeTaskChanges(tasks, u.id, withDoneOn(u.changes, op));
       });
       break;
 
@@ -1573,11 +1592,11 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
   // already fully available locally once TAG entities have replayed, so
   // there's no fetch round-trip worth avoiding the way there is for a
   // task's full notes text.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, remindAt: t.remindAt || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, deadlineDays: taskDeadlineDays(t), recurs: t.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(t) });
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, doneOn: t.doneOn || undefined, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, remindAt: t.remindAt || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, deadlineDays: taskDeadlineDays(t), recurs: t.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(t) });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, remindAt: sub.remindAt || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, deadlineDays: taskDeadlineDays(sub), recurs: sub.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(sub) });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, doneOn: sub.doneOn || undefined, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, remindAt: sub.remindAt || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, deadlineDays: taskDeadlineDays(sub), recurs: sub.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(sub) });
     }
   });
 }
@@ -2435,6 +2454,7 @@ module.exports = {
   repeatOccurrences: repeatOccurrences,
   NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,
+  logicalDayStartMs: logicalDayStartMs,
   yesterdayStr: yesterdayStr,
   dateToDateStr: dateToDateStr,
   HIDE_DONE_GRACE_MS: HIDE_DONE_GRACE_MS,
