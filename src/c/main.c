@@ -678,6 +678,9 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     if (!dim) {
       graphics_context_set_stroke_color(ctx, GColorDarkGray);
       graphics_draw_line(ctx, GPoint(x0, base), GPoint(x0 + w, base));
+      // on-pace guide: the day's tasks falling evenly to none by day's end -
+      // the line above it is behind, below it ahead
+      graphics_draw_line(ctx, GPoint(x0, base - hmax), GPoint(x0 + w, base));
     }
 #endif
     int shown = s_burn_n;
