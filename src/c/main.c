@@ -711,6 +711,9 @@ static void ring_update_proc(Layer *layer, GContext *ctx) {
     if (!dim) {
       graphics_context_set_stroke_color(ctx, GColorDarkGray);
       graphics_draw_line(ctx, GPoint(x0, base), GPoint(x0 + w, base));
+      // on-pace guide: the day's tasks falling evenly to none by day's end -
+      // the line above it is behind, below it ahead
+      graphics_draw_line(ctx, GPoint(x0, base - hmax), GPoint(x0 + w, base));
     }
 #endif
     int shown = s_burn_n;
@@ -1017,9 +1020,9 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     int iw = 10;  // blood drop glyph + gap
     int x0 = b.size.w / 2 - (iw + textw) / 2;
 
-    // blood drop glyph: a tapered point over a round bulb - always red,
-    // unlike the reading's text colour which reflects value/staleness
-    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
+    // blood drop glyph: a tapered point over a round bulb, tinted like the
+    // reading so it only goes red when actually low
+    graphics_context_set_fill_color(ctx, gcol);
     graphics_fill_rect(ctx, GRect(x0 + 3, 5, 1, 1), 0, GCornerNone);
     graphics_fill_rect(ctx, GRect(x0 + 2, 6, 3, 1), 0, GCornerNone);
     graphics_fill_rect(ctx, GRect(x0 + 1, 7, 5, 1), 0, GCornerNone);
