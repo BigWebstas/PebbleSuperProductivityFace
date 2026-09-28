@@ -373,6 +373,60 @@ function applyPresence(config) {
   presenceConnect();
 }
 
+// ---------- blood glucose (personal feature, this branch only) ----------
+// Polls xDrip+'s own local web service directly - Settings > Inter-app
+// settings > "xDrip Web Service" must be ON in xDrip+ on this phone. Same
+// endpoint and trend-code mapping as the standalone xDrip Pebble app; this
+// just asks for the latest reading instead of history, since the face only
+// has room to show a number and an arrow. Independent of doSync()'s poll -
+// this is a local, radio-free call to the phone's own loopback address.
+var GLUCOSE_BASE = 'http://127.0.0.1:17580';
+// A CGM reading only changes every ~5 min, so poll on that cadence rather
+// than every minute - a tighter poll just re-fetches the same sample.
+var GLUCOSE_POLL_MS = 5 * 60 * 1000;
+var GLUCOSE_DIRECTION_TREND = {
+  DoubleUp: 1, SingleUp: 2, FortyFiveUp: 3, Flat: 4,
+  FortyFiveDown: 5, SingleDown: 6, DoubleDown: 7,
+};
+// The timestamp of the last sample actually pushed to the watch - lets a
+// poll that re-fetches the same sample skip the AppMessage (and the
+// Bluetooth wake + redraw that comes with it) entirely. Keyed on the
+// reading's own timestamp rather than its value, so a genuinely new sample
+// that happens to repeat the same mg/dL still gets pushed - the watch needs
+// that to re-anchor its local "age" ticker (see glucose_effective_age_s()).
+var lastGlucoseDate = 0;
+function fetchGlucose() {
+  var req = new XMLHttpRequest();
+  req.open('GET', GLUCOSE_BASE + '/sgv.json?count=1', true);
+  req.timeout = 8000;
+  req.onload = function () {
+    if (req.status !== 200) { return; }
+    var rows;
+    try { rows = JSON.parse(req.responseText); } catch (e) { return; }
+    if (!rows || !rows.length) { return; }
+    var latest = rows[0];
+    var readingDate = parseInt(latest.date, 10) || 0;
+    if (readingDate && readingDate === lastGlucoseDate) { return; } // same sample as last poll
+    var sgv = parseInt(latest.sgv, 10) || 0;
+    if (sgv <= 0) { return; }
+    var trend = parseInt(latest.trend, 10);
+    if (!trend || trend < 1 || trend > 7) { trend = GLUCOSE_DIRECTION_TREND[latest.direction] || 0; }
+    var ageMs = Date.now() - (readingDate || Date.now());
+    lastGlucoseDate = readingDate;
+    sendToFace({
+      MSG_TYPE: 0,
+      FACE_GLUCOSE_SGV: sgv,
+      FACE_GLUCOSE_TREND: trend,
+      FACE_GLUCOSE_AGE_S: Math.max(0, Math.round(ageMs / 1000)),
+    });
+  };
+  // xDrip+'s web service being off, or the phone just not having it
+  // installed, are both silent no-ops - the face just shows nothing.
+  req.onerror = function () {};
+  req.ontimeout = function () {};
+  req.send();
+}
+
 // ---------- events ----------
 Pebble.addEventListener('ready', function () {
   console.log('[spf] ready');
@@ -380,6 +434,8 @@ Pebble.addEventListener('ready', function () {
   if (config && config.pollMin) { POLL_MS = config.pollMin * 60 * 1000; }
   doSync();
   applyPresence(config);
+  fetchGlucose();
+  setInterval(fetchGlucose, GLUCOSE_POLL_MS);
   setInterval(function () {
     if (Date.now() - lastPollAt >= POLL_MS) {
       doSync();

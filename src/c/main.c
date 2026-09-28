@@ -33,6 +33,11 @@
 #define KEY_BATT_SOUND       MESSAGE_KEY_FACE_BATT_SOUND    // 0/1, alert cue (speaker tone, or vibrate if there's no speaker) on either threshold
 #define KEY_BATT_VOLUME      MESSAGE_KEY_FACE_BATT_VOLUME_PCT  // speaker volume for the alert cue, 0-100
 
+// Personal feature (this branch only): xDrip+ local API glucose readout.
+#define KEY_GLUCOSE_SGV      MESSAGE_KEY_FACE_GLUCOSE_SGV    // mg/dL, 0 = no reading yet
+#define KEY_GLUCOSE_TREND    MESSAGE_KEY_FACE_GLUCOSE_TREND  // xDrip trend code 1..7, 0 = unknown
+#define KEY_GLUCOSE_AGE_S    MESSAGE_KEY_FACE_GLUCOSE_AGE_S  // seconds old as of the phone's report
+
 #define MSG_REFRESH_REQUEST 1
 
 // which face elements are drawn - a bitmask set from the config page. All on
@@ -48,7 +53,8 @@
 // persist keys
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
        PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK_UNUSED, PK_LAST_OK,
-       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME, PK_BURN };
+       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME,
+       PK_GLUCOSE_SGV, PK_GLUCOSE_TREND, PK_GLUCOSE_AGE, PK_GLUCOSE_RX, PK_BURN };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
@@ -82,6 +88,17 @@ static time_t s_last_ok = 0;
 static int s_line_mode = 0;
 static int s_steps = 0;
 static int s_hr = 0;         // last heart-rate reading, BPM (0 = none / no sensor)
+// Blood glucose from xDrip+'s local web service, polled by the phone JS -
+// see src/pkjs/index.js's fetchGlucose(). Personal feature, not toggleable.
+static int s_glucose_sgv = 0;      // mg/dL, 0 = no reading yet
+static int s_glucose_trend = 0;    // xDrip trend code 1..7 (1=doubleUp..7=doubleDown), 0 = unknown
+static int s_glucose_age_s = 0;    // seconds old as of s_glucose_received, per the phone's report
+static time_t s_glucose_received = 0;
+// Low/high danger-zone flash, same latch-and-blink shape as the battery
+// alert below - fires once per crossing, re-arms once back in range.
+static bool s_glucose_low_alerted = false;
+static bool s_glucose_high_alerted = false;
+static int s_glucose_flash_tick = 0;   // 0 = idle
 static bool s_bt = true;
 static int s_show = SHOW_ALL;   // which elements to draw (config bitmask)
 // Battery health alert (optimize-charging style range) - set from the config
@@ -119,12 +136,14 @@ static GColor s_status_color;
 #define TIME_ROLL_TICKS 6      // minute vertical-roll length
 #define STEPS_ROLL_TICKS 6     // steps-count vertical-roll length
 #define TASKS_ROLL_TICKS 6     // tasks-left vertical-roll length
+#define GLUCOSE_ROLL_TICKS 6   // glucose-reading vertical-roll length
 #define HR_ROLL_TICKS 6        // heart-rate vertical-roll length
 #define POP_TICKS 4            // habits-complete checkmark pop length
 #define SPARK_TICKS 8          // burndown draw-in length
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
 #define BATT_FLASH_TICKS 40    // battery-threshold gauge blink length (~1.3s)
+#define GLUCOSE_FLASH_TICKS 40 // low/high danger-zone blink length (~1.3s)
 #define INTRO_TICKS 12         // launch stagger length
 #define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
 static AppTimer *s_anim_timer = NULL;
@@ -142,6 +161,8 @@ static int s_steps_roll_tick = 0;    // 0 = idle (steps-count vertical roll)
 static char s_steps_prev[16] = "";
 static int s_tasks_roll_tick = 0;    // 0 = idle (tasks-left vertical roll)
 static char s_tasks_prev[16] = "";
+static int s_glucose_roll_tick = 0;  // 0 = idle (glucose-reading vertical roll)
+static char s_glucose_prev[16] = "";
 static int s_hr_roll_tick = 0;       // 0 = idle (heart-rate vertical roll)
 static char s_hr_prev[8] = "";
 static int s_hab_pop_tick = 0;       // 0 = idle (habits-complete checkmark pop)
@@ -509,6 +530,12 @@ static void anim_tick(void *data) {
     else { more = true; }
     if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
   }
+  if (s_glucose_roll_tick > 0) {
+    s_glucose_roll_tick++;
+    if (s_glucose_roll_tick > GLUCOSE_ROLL_TICKS) { s_glucose_roll_tick = 0; s_glucose_prev[0] = '\0'; }
+    else { more = true; }
+    layer_mark_dirty(s_top_layer);
+  }
   if (s_hr_roll_tick > 0) {
     s_hr_roll_tick++;
     if (s_hr_roll_tick > HR_ROLL_TICKS) { s_hr_roll_tick = 0; s_hr_prev[0] = '\0'; }
@@ -553,6 +580,12 @@ static void anim_tick(void *data) {
   if (s_batt_flash_tick > 0) {
     s_batt_flash_tick++;
     if (s_batt_flash_tick > BATT_FLASH_TICKS) { s_batt_flash_tick = 0; }
+    else { more = true; }
+    layer_mark_dirty(s_top_layer);
+  }
+  if (s_glucose_flash_tick > 0) {
+    s_glucose_flash_tick++;
+    if (s_glucose_flash_tick > GLUCOSE_FLASH_TICKS) { s_glucose_flash_tick = 0; }
     else { more = true; }
     layer_mark_dirty(s_top_layer);
   }
@@ -783,6 +816,21 @@ static void format_comma_int(char *out, size_t n, int v) {
   out[o] = '\0';
 }
 
+static void format_glucose(char *out, size_t n, int sgv, int trend) {
+  const char *arrow;
+  switch (trend) {
+    case 1: arrow = "^^"; break;   // double up
+    case 2: arrow = "^";  break;
+    case 3: arrow = "/";  break;
+    case 4: arrow = "-";  break;
+    case 5: arrow = "\\"; break;
+    case 6: arrow = "v";  break;
+    case 7: arrow = "vv"; break;   // double down
+    default: arrow = "";  break;
+  }
+  snprintf(out, n, "%d%s", sgv, arrow);
+}
+
 static void format_tasks_left(char *out, size_t n, int done, int total) {
   if (total <= 0) { out[0] = '\0'; return; }
   int left = total - done;
@@ -824,6 +872,15 @@ static void draw_rolled(GContext *ctx, GFont f, GRect box, const char *text,
   for (int i = 0; i < n; i++) {
     char cur[2] = { text[i], '\0' };
     bool changed = pn != n || i >= pn || prev[i] != text[i];
+    // Each cell is w[i]+3 wide, not w[i] - the +3 gives a glyph's own
+    // antialiased right edge room so GTextOverflowModeFill doesn't clip it.
+    // That means neighbouring cells overlap by 3px; without re-erasing this
+    // cell first, a previous character's edge pixels left in that overlap
+    // survive as a stray sliver beside the one drawn here. (fill_color is a
+    // separate context field from text_color, so this doesn't disturb it.)
+    graphics_context_set_fill_color(ctx, theme_bg());
+    graphics_fill_rect(ctx, GRect(x, box.origin.y - roll, w[i] + 3, 2 * span),
+                       0, GCornerNone);
     if (changed) {
       char old[2] = { (i < pn ? prev[i] : ' '), '\0' };
       graphics_draw_text(ctx, old, f, GRect(x, box.origin.y - roll, w[i] + 3, span),
@@ -845,26 +902,65 @@ static void draw_comma_int(GContext *ctx, GFont f, GRect box, int v, GTextAlignm
   draw_rolled(ctx, f, box, out, s_steps_prev, s_steps_roll_tick, STEPS_ROLL_TICKS, al);
 }
 
+// Blood glucose (xDrip+ local API, personal feature). Age keeps ticking
+// locally between phone polls, same pattern as the tracking timer's
+// s_track_received - see trackedOverS()'s equivalent in the JS side.
+static int glucose_effective_age_s(void) {
+  if (s_glucose_sgv <= 0) { return 0; }
+  return s_glucose_age_s + (int)(time(NULL) - s_glucose_received);
+}
+
+static GColor glucose_color(int sgv) {
+  if (sgv < 70)  { return PBL_IF_COLOR_ELSE(GColorRed, theme_fg()); }
+  if (sgv > 180) { return PBL_IF_COLOR_ELSE(GColorYellow, theme_fg()); }
+  return PBL_IF_COLOR_ELSE(GColorGreen, theme_fg());
+}
+
+// Blink the readout and vibrate once when a fresh reading crosses into the
+// low or high zone - same latch-and-blink shape as check_battery_alert().
+static void check_glucose_alert(int sgv) {
+  bool low = sgv > 0 && sgv < 70;
+  bool high = sgv > 180;
+
+  if (low && !s_glucose_low_alerted) {
+    s_glucose_low_alerted = true;
+    s_glucose_flash_tick = 1;
+    vibes_double_pulse();
+    kick_anim();
+  } else if (!low) {
+    s_glucose_low_alerted = false;
+  }
+
+  if (high && !s_glucose_high_alerted) {
+    s_glucose_high_alerted = true;
+    s_glucose_flash_tick = 1;
+    vibes_double_pulse();
+    kick_anim();
+  } else if (!high) {
+    s_glucose_high_alerted = false;
+  }
+}
+
 static void top_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   GColor fg = theme_fg();
-  // Clear first: elements here (steps count, "no phone") vary in width
+  // Clear first: elements here (steps count, glucose text, "no phone") vary in width
   // between redraws, and without this, narrower new text leaves stale
   // pixels from the wider previous draw flanking it.
   graphics_context_set_fill_color(ctx, theme_bg());
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
 
-  // steps, left: a small shoe glyph + comma-grouped count
+  // steps, left: a small footprint glyph + comma-grouped count
 #if defined(PBL_HEALTH)
   if ((s_show & SHOW_STEPS) && s_steps > 0) {
     int sx = 6, sy = 6;
     graphics_context_set_fill_color(ctx, fg);
-    graphics_fill_rect(ctx, GRect(sx + 2, sy + 3, 8, 2), 0, GCornerNone); // upper
-    graphics_fill_rect(ctx, GRect(sx + 1, sy + 5, 10, 2), 0, GCornerNone); // body
-    graphics_fill_circle(ctx, GPoint(sx + 10, sy + 6), 3);                // toe
-    graphics_fill_circle(ctx, GPoint(sx + 2, sy + 7), 2);                 // heel
-    graphics_fill_rect(ctx, GRect(sx, sy + 8, 12, 1), 0, GCornerNone);    // sole
+    graphics_fill_circle(ctx, GPoint(sx + 3, sy - 1), 1); // toes
+    graphics_fill_circle(ctx, GPoint(sx + 6, sy - 2), 1);
+    graphics_fill_circle(ctx, GPoint(sx + 9, sy - 1), 1);
+    graphics_fill_circle(ctx, GPoint(sx + 6, sy + 3), 4); // ball of foot
+    graphics_fill_circle(ctx, GPoint(sx + 4, sy + 8), 3); // heel, offset to curve the arch
     draw_comma_int(ctx, fonts_get_system_font(FONT_KEY_GOTHIC_18),
                    GRect(sx + 15, 0, b.size.w / 2 - 15, 18), s_steps, GTextAlignmentLeft);
   }
@@ -907,6 +1003,37 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     graphics_draw_text(ctx, "no phone", fonts_get_system_font(FONT_KEY_GOTHIC_14),
                        GRect(b.size.w / 2 - 45, 0, 90, 16),
                        GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+  } else if (s_glucose_sgv > 0) {
+    // Blood glucose, top centre - no phone means no fresh xDrip+ poll either,
+    // so this and the mark above never really compete for the same spot.
+    char gbuf[16];
+    format_glucose(gbuf, sizeof(gbuf), s_glucose_sgv, s_glucose_trend);
+    GColor gcol = glucose_effective_age_s() > 720   // stale past ~12 min
+      ? PBL_IF_COLOR_ELSE(GColorLightGray, theme_fg())
+      : glucose_color(s_glucose_sgv);
+    GFont gf = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+    int textw = graphics_text_layout_get_content_size(
+        gbuf, gf, GRect(0, 0, 90, 20), GTextOverflowModeFill, GTextAlignmentLeft).w;
+    int iw = 10;  // blood drop glyph + gap
+    int x0 = b.size.w / 2 - (iw + textw) / 2;
+
+    // blood drop glyph: a tapered point over a round bulb - always red,
+    // unlike the reading's text colour which reflects value/staleness
+    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
+    graphics_fill_rect(ctx, GRect(x0 + 3, 5, 1, 1), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(x0 + 2, 6, 3, 1), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(x0 + 1, 7, 5, 1), 0, GCornerNone);
+    graphics_fill_circle(ctx, GPoint(x0 + 3, 11), 3);
+
+    graphics_context_set_text_color(ctx, gcol);
+    draw_rolled(ctx, gf, GRect(x0 + iw, -1, textw + 4, 20), gbuf, s_glucose_prev,
+               s_glucose_roll_tick, GLUCOSE_ROLL_TICKS, GTextAlignmentLeft);
+    // Blink a highlight box around the reading right after it crosses into
+    // the low or high zone - same cadence as the battery gauge's blink.
+    if (s_glucose_flash_tick > 0 && (s_glucose_flash_tick / 5) % 2 == 0) {
+      graphics_context_set_stroke_color(ctx, theme_bg());
+      graphics_draw_rect(ctx, GRect(x0 - 2, 0, iw + textw + 4, 18));
+    }
   }
 
   // brief green underline when the phone has just reconnected
@@ -1050,6 +1177,28 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   if ((t = dict_find(iter, KEY_BATT_HIGH))) { s_batt_high_pct = t->value->int32; }
   if ((t = dict_find(iter, KEY_BATT_SOUND))) { s_batt_sound = t->value->int32 != 0; }
   if ((t = dict_find(iter, KEY_BATT_VOLUME))) { s_batt_volume = t->value->int32; }
+  if ((t = dict_find(iter, KEY_GLUCOSE_SGV))) {
+    char glucose_prev_fmt[16];
+    bool had_glucose = s_glucose_sgv > 0;
+    if (had_glucose) { format_glucose(glucose_prev_fmt, sizeof(glucose_prev_fmt), s_glucose_sgv, s_glucose_trend); }
+    s_glucose_sgv = t->value->int32;
+    Tuple *tt;
+    if ((tt = dict_find(iter, KEY_GLUCOSE_TREND))) { s_glucose_trend = tt->value->int32; }
+    if ((tt = dict_find(iter, KEY_GLUCOSE_AGE_S))) { s_glucose_age_s = tt->value->int32; }
+    s_glucose_received = time(NULL);
+    check_glucose_alert(s_glucose_sgv);
+    if (had_glucose && s_glucose_sgv > 0) {
+      char glucose_new_fmt[16];
+      format_glucose(glucose_new_fmt, sizeof(glucose_new_fmt), s_glucose_sgv, s_glucose_trend);
+      if (strcmp(glucose_prev_fmt, glucose_new_fmt) != 0) {
+        strncpy(s_glucose_prev, glucose_prev_fmt, sizeof(s_glucose_prev));
+        s_glucose_prev[sizeof(s_glucose_prev) - 1] = '\0';
+        s_glucose_roll_tick = 1;
+        kick_anim();
+      }
+    }
+    layer_mark_dirty(s_top_layer);
+  }
   bool got_done = false, got_total = false;
   char tasks_prev_fmt[16];
   format_tasks_left(tasks_prev_fmt, sizeof(tasks_prev_fmt), s_done, s_total);
@@ -1292,6 +1441,12 @@ static void load_persisted(void) {
   s_batt_high_pct = persist_exists(PK_BATT_HIGH) ? persist_read_int(PK_BATT_HIGH) : 80;
   s_batt_sound = persist_exists(PK_BATT_SOUND) ? persist_read_int(PK_BATT_SOUND) != 0 : true;
   s_batt_volume = persist_exists(PK_BATT_VOLUME) ? persist_read_int(PK_BATT_VOLUME) : 80;
+  if (persist_exists(PK_GLUCOSE_RX)) {
+    s_glucose_sgv = persist_read_int(PK_GLUCOSE_SGV);
+    s_glucose_trend = persist_read_int(PK_GLUCOSE_TREND);
+    s_glucose_age_s = persist_read_int(PK_GLUCOSE_AGE);
+    s_glucose_received = (time_t)persist_read_int(PK_GLUCOSE_RX);
+  }
   if (!persist_exists(PK_TOTAL)) { return; }
   s_done = persist_read_int(PK_DONE);
   s_total = persist_read_int(PK_TOTAL);
@@ -1345,6 +1500,12 @@ static void save_persisted(void) {
   persist_write_int(PK_BATT_HIGH, s_batt_high_pct);
   persist_write_int(PK_BATT_SOUND, s_batt_sound ? 1 : 0);
   persist_write_int(PK_BATT_VOLUME, s_batt_volume);
+  if (s_glucose_sgv > 0) {
+    persist_write_int(PK_GLUCOSE_SGV, s_glucose_sgv);
+    persist_write_int(PK_GLUCOSE_TREND, s_glucose_trend);
+    persist_write_int(PK_GLUCOSE_AGE, s_glucose_age_s);
+    persist_write_int(PK_GLUCOSE_RX, (int)s_glucose_received);
+  }
 }
 
 static void init(void) {
