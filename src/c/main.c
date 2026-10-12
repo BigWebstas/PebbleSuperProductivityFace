@@ -198,6 +198,13 @@ static GColor theme_fg(void)  { return s_light ? GColorBlack : GColorWhite; }
 static GColor theme_secondary(void) {
   return PBL_IF_COLOR_ELSE(s_light ? GColorBlack : GColorLightGray, theme_fg());
 }
+// Tasks-left / habits-left counts - lighter than theme_secondary()'s date
+// gray so these stand out more against a black background. Pebble's palette
+// only has three grays (DarkGray/LightGray/White), so "lighter than
+// LightGray" is plain white here - same as theme_fg() on the dark theme.
+static GColor theme_remaining(void) {
+  return PBL_IF_COLOR_ELSE(s_light ? GColorBlack : GColorWhite, theme_fg());
+}
 static GColor theme_track(void) {
   // GColorFromRGB(42,42,42) quantizes to Pebble's nearest palette level,
   // which rounds down to pure black - invisible against a black background.
@@ -755,7 +762,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
   // "N/M habits · streak" line.
   if ((s_show & SHOW_HABITS) && s_hab_total > 0) {
     bool all = s_hab_done >= s_hab_total;
-    GColor hcol = dim ? GColorDarkGray : (all ? theme_green() : theme_secondary());
+    GColor hcol = dim ? GColorDarkGray : (all ? theme_green() : theme_remaining());
     char rb[12];
     snprintf(rb, sizeof(rb), "%d/%d", s_hab_done, s_hab_total);
     int textw = graphics_text_layout_get_content_size(
@@ -781,7 +788,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     char tb[16];
     format_tasks_left(tb, sizeof(tb), s_done, s_total);
     graphics_context_set_text_color(ctx,
-        dim ? GColorDarkGray : (left <= 0 ? theme_green() : theme_secondary()));
+        dim ? GColorDarkGray : (left <= 0 ? theme_green() : theme_remaining()));
     draw_rolled(ctx, f18, GRect(b.size.w - rx - 80, 0, 80, 18), tb, s_tasks_prev,
                s_tasks_roll_tick, TASKS_ROLL_TICKS, GTextAlignmentRight);
   }
