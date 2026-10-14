@@ -224,11 +224,40 @@ static GColor theme_heart(void) {
   return PBL_IF_COLOR_ELSE(s_light ? GColorRed : GColorSunsetOrange, theme_fg());
 }
 
-// Blinking highlight: a filled box with the content inverted, on for 5 ticks
-// then off for 5. Same cadence the battery gauge uses.
-static bool flash_on(int tick) { return tick > 0 && (tick / 5) % 2 == 0; }
-static GColor alert_fill(void) { return PBL_IF_COLOR_ELSE(GColorRed, theme_fg()); }
-static GColor alert_ink(void)  { return PBL_IF_COLOR_ELSE(GColorWhite, theme_bg()); }
+// Pulsing highlight: a red box behind the reading, with the content inverting
+// as it fades in and out. A triangle wave over 20 ticks (~0.66s; the 40-tick
+// flash is two full pulses, ending dark), quantised to 0-3 - the colour
+// panels only have 4 levels per channel, so 3 steps up is as smooth as it
+// gets. Black-and-white panels can't fade, so they snap at the half-way level.
+#define FLASH_PULSE_TICKS 20
+#define FLASH_LEVELS 3
+static int flash_level(int tick) {
+  if (tick <= 0) { return 0; }
+  int ph = tick % FLASH_PULSE_TICKS;
+  int tri = ph < FLASH_PULSE_TICKS / 2 ? ph : FLASH_PULSE_TICKS - ph;   // 0..10..0
+  return tri * FLASH_LEVELS * 2 / FLASH_PULSE_TICKS;                    // 0..3
+}
+static GColor mix_color(GColor a, GColor b, int lvl) {
+  return GColorFromRGB(
+      (a.r * 85) + ((b.r - a.r) * 85) * lvl / FLASH_LEVELS,
+      (a.g * 85) + ((b.g - a.g) * 85) * lvl / FLASH_LEVELS,
+      (a.b * 85) + ((b.b - a.b) * 85) * lvl / FLASH_LEVELS);
+}
+static GColor alert_fill(int lvl) {
+#if defined(PBL_COLOR)
+  return mix_color(theme_bg(), GColorRed, lvl);
+#else
+  return lvl * 2 > FLASH_LEVELS ? theme_fg() : theme_bg();
+#endif
+}
+// `normal` is the colour the content has when the pulse is at rest.
+static GColor alert_ink(int lvl, GColor normal) {
+#if defined(PBL_COLOR)
+  return mix_color(normal, GColorWhite, lvl);
+#else
+  return lvl * 2 > FLASH_LEVELS ? theme_bg() : normal;
+#endif
+}
 
 static bool hr_out_of_range(void) {
   return s_hr > 0 && (s_hr <= HR_LOW_BPM || s_hr >= HR_HIGH_BPM);
@@ -752,14 +781,14 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
   if ((s_show & SHOW_HR) && s_hr > 0) {
     char hb[8];
     snprintf(hb, sizeof(hb), "%d", s_hr);
-    bool hflash = flash_on(s_hr_flash_tick);
-    if (hflash) {
+    int hlvl = flash_level(s_hr_flash_tick);
+    if (hlvl > 0) {
       int hw = graphics_text_layout_get_content_size(
           hb, f18, GRect(0, 0, 40, 20), GTextOverflowModeFill, GTextAlignmentLeft).w;
-      graphics_context_set_fill_color(ctx, alert_fill());
+      graphics_context_set_fill_color(ctx, alert_fill(hlvl));
       graphics_fill_rect(ctx, GRect(lx - 3, 0, 12 + 3 + hw + 4, 19), 3, GCornersAll);
     }
-    GColor hc = hflash ? alert_ink() : dim ? GColorDarkGray : theme_heart();
+    GColor hc = alert_ink(hlvl, dim ? GColorDarkGray : theme_heart());
     int hy = 5;
     int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;
     graphics_context_set_fill_color(ctx, hc);
@@ -767,7 +796,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     graphics_fill_circle(ctx, GPoint(lx + 6, hy + 3), 2 + sw);
     graphics_fill_rect(ctx, GRect(lx - sw, hy + 3, 8 + 2 * sw, 3 + sw), 0, GCornerNone);
     graphics_fill_rect(ctx, GRect(lx + 2 - sw, hy + 6 + sw, 4 + 2 * sw, 2), 0, GCornerNone);
-    graphics_context_set_text_color(ctx, hflash ? alert_ink() : dim ? GColorDarkGray : theme_fg());
+    graphics_context_set_text_color(ctx, alert_ink(hlvl, dim ? GColorDarkGray : theme_fg()));
     draw_rolled(ctx, f18, GRect(lx + 12, 0, 40, 18), hb, s_hr_prev,
                s_hr_roll_tick, HR_ROLL_TICKS, GTextAlignmentLeft);
   }
