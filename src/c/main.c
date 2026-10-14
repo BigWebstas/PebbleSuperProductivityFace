@@ -97,6 +97,9 @@ static time_t s_glucose_received = 0;
 static bool s_glucose_low_alerted = false;
 static bool s_glucose_high_alerted = false;
 static int s_glucose_flash_tick = 0;   // 0 = idle
+static bool s_glucose_stale_alerted = false;
+static int s_hr_flash_tick = 0;        // 0 = idle (out-of-range blink on the heart-rate reading)
+static bool s_hr_alerted = false;
 static bool s_bt = true;
 static int s_show = SHOW_ALL;   // which elements to draw (config bitmask)
 // Battery health alert (optimize-charging style range) - set from the config
@@ -141,7 +144,11 @@ static GColor s_status_color;
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
 #define BATT_FLASH_TICKS 40    // battery-threshold gauge blink length (~1.3s)
-#define GLUCOSE_FLASH_TICKS 40 // low/high danger-zone blink length (~1.3s)
+#define GLUCOSE_FLASH_TICKS 40 // low/high/stale blink length (~1.3s)
+#define HR_FLASH_TICKS 40      // out-of-range heart-rate blink length (~1.3s)
+#define HR_LOW_BPM 45          // at/below this the reading blinks
+#define HR_HIGH_BPM 120        // at/above this the reading blinks
+#define GLUCOSE_STALE_S 720    // a reading older than ~12 min is stale
 #define INTRO_TICKS 12         // launch stagger length
 #define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
 static AppTimer *s_anim_timer = NULL;
@@ -230,6 +237,12 @@ static GColor theme_moon(void) {
 // "All good" text green (tracking under estimate, all habits done, all tasks
 // done). Pure GColorGreen is neon-bright and washes out on white, so light
 // theme drops to a darker shade.
+// Blinking highlight: a filled box with the content inverted, on for 5 ticks
+// then off for 5. Same cadence the battery gauge uses.
+static bool flash_on(int tick) { return tick > 0 && (tick / 5) % 2 == 0; }
+static GColor alert_fill(void) { return PBL_IF_COLOR_ELSE(GColorRed, theme_fg()); }
+static GColor alert_ink(void)  { return PBL_IF_COLOR_ELSE(GColorWhite, theme_bg()); }
+
 static GColor theme_green(void) {
   return PBL_IF_COLOR_ELSE(s_light ? GColorIslamicGreen : GColorGreen, theme_fg());
 }
@@ -589,6 +602,12 @@ static void anim_tick(void *data) {
     else { more = true; }
     layer_mark_dirty(s_top_layer);
   }
+  if (s_hr_flash_tick > 0) {
+    s_hr_flash_tick++;
+    if (s_hr_flash_tick > HR_FLASH_TICKS) { s_hr_flash_tick = 0; }
+    else { more = true; }
+    if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
   if (s_intro_tick > 0) {
     if (s_intro_tick == 2 && s_time_roll_tick == 0) { s_time_prev[0] = '\0'; s_time_roll_tick = 1; }
     if (s_intro_tick == 5) { s_status_prev[0] = '\0'; s_slide_tick = 1; }
@@ -741,7 +760,16 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
 
   // heart rate, left: a tiny heart + BPM (thumps on a fresh reading)
   if ((s_show & SHOW_HR) && s_hr > 0) {
-    GColor hc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, theme_fg());
+    char hb[8];
+    snprintf(hb, sizeof(hb), "%d", s_hr);
+    bool hflash = flash_on(s_hr_flash_tick);
+    if (hflash) {
+      int hw = graphics_text_layout_get_content_size(
+          hb, f18, GRect(0, 0, 40, 20), GTextOverflowModeFill, GTextAlignmentLeft).w;
+      graphics_context_set_fill_color(ctx, alert_fill());
+      graphics_fill_rect(ctx, GRect(lx - 3, 0, 12 + 3 + hw + 4, 19), 3, GCornersAll);
+    }
+    GColor hc = hflash ? alert_ink() : dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorRed, theme_fg());
     int hy = 5;
     int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;
     graphics_context_set_fill_color(ctx, hc);
@@ -749,9 +777,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     graphics_fill_circle(ctx, GPoint(lx + 6, hy + 3), 2 + sw);
     graphics_fill_rect(ctx, GRect(lx - sw, hy + 3, 8 + 2 * sw, 3 + sw), 0, GCornerNone);
     graphics_fill_rect(ctx, GRect(lx + 2 - sw, hy + 6 + sw, 4 + 2 * sw, 2), 0, GCornerNone);
-    char hb[8];
-    snprintf(hb, sizeof(hb), "%d", s_hr);
-    GColor htc = dim ? GColorDarkGray : PBL_IF_COLOR_ELSE(GColorMelon, theme_fg());
+    GColor htc = hflash ? alert_ink() : dim ? GColorDarkGray : theme_fg();
     graphics_context_set_text_color(ctx, htc);
     draw_rolled(ctx, f18, GRect(lx + 12, 0, 40, 18), hb, s_hr_prev,
                s_hr_roll_tick, HR_ROLL_TICKS, GTextAlignmentLeft);
@@ -899,12 +925,6 @@ static int glucose_effective_age_s(void) {
   return s_glucose_age_s + (int)(time(NULL) - s_glucose_received);
 }
 
-static GColor glucose_color(int sgv) {
-  if (sgv < 70)  { return PBL_IF_COLOR_ELSE(GColorRed, theme_fg()); }
-  if (sgv > 180) { return PBL_IF_COLOR_ELSE(GColorYellow, theme_fg()); }
-  return PBL_IF_COLOR_ELSE(GColorGreen, theme_fg());
-}
-
 // Blink the readout and vibrate once when a fresh reading crosses into the
 // low or high zone - same latch-and-blink shape as check_battery_alert().
 static void check_glucose_alert(int sgv) {
@@ -928,6 +948,31 @@ static void check_glucose_alert(int sgv) {
   } else if (!high) {
     s_glucose_high_alerted = false;
   }
+}
+
+static bool glucose_is_stale(void) {
+  return s_glucose_sgv > 0 && glucose_effective_age_s() > GLUCOSE_STALE_S;
+}
+
+static bool glucose_needs_attention(void) {
+  return s_glucose_sgv > 0 && (s_glucose_sgv < 70 || s_glucose_sgv > 180 || glucose_is_stale());
+}
+
+// Blink once when a reading goes stale (time-based, so it's checked each
+// minute rather than on a new reading); re-arms when a fresh one lands.
+static void check_glucose_stale(void) {
+  bool stale = glucose_is_stale();
+  if (stale && !s_glucose_stale_alerted) {
+    s_glucose_stale_alerted = true;
+    s_glucose_flash_tick = 1;
+    kick_anim();
+  } else if (!stale) {
+    s_glucose_stale_alerted = false;
+  }
+}
+
+static bool hr_out_of_range(void) {
+  return s_hr > 0 && (s_hr <= HR_LOW_BPM || s_hr >= HR_HIGH_BPM);
 }
 
 static void top_update_proc(Layer *layer, GContext *ctx) {
@@ -997,18 +1042,20 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     // so this and the mark above never really compete for the same spot.
     char gbuf[16];
     format_glucose(gbuf, sizeof(gbuf), s_glucose_sgv, s_glucose_trend);
-    GColor gcol = glucose_effective_age_s() > 720   // stale past ~12 min
-      ? PBL_IF_COLOR_ELSE(GColorLightGray, theme_fg())
-      : glucose_color(s_glucose_sgv);
+    bool gflash = flash_on(s_glucose_flash_tick);
+    GColor gcol = gflash ? alert_ink() : theme_fg();  // static: black on light, white on dark
     GFont gf = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
     int textw = graphics_text_layout_get_content_size(
         gbuf, gf, GRect(0, 0, 90, 20), GTextOverflowModeFill, GTextAlignmentLeft).w;
     int iw = 10;  // blood drop glyph + gap
     int x0 = b.size.w / 2 - (iw + textw) / 2;
 
-    // blood drop glyph: a tapered point over a round bulb - always red,
-    // unlike the reading's text colour which reflects value/staleness
-    graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
+    if (gflash) {
+      graphics_context_set_fill_color(ctx, alert_fill());
+      graphics_fill_rect(ctx, GRect(x0 - 3, 0, iw + textw + 7, 19), 3, GCornersAll);
+    }
+    // blood drop glyph: a tapered point over a round bulb - red (inverted while blinking)
+    graphics_context_set_fill_color(ctx, gflash ? alert_ink() : PBL_IF_COLOR_ELSE(GColorRed, theme_fg()));
     graphics_fill_rect(ctx, GRect(x0 + 3, 5, 1, 1), 0, GCornerNone);
     graphics_fill_rect(ctx, GRect(x0 + 2, 6, 3, 1), 0, GCornerNone);
     graphics_fill_rect(ctx, GRect(x0 + 1, 7, 5, 1), 0, GCornerNone);
@@ -1017,12 +1064,6 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_text_color(ctx, gcol);
     draw_rolled(ctx, gf, GRect(x0 + iw, -1, textw + 4, 20), gbuf, s_glucose_prev,
                s_glucose_roll_tick, GLUCOSE_ROLL_TICKS, GTextAlignmentLeft);
-    // Blink a highlight box around the reading right after it crosses into
-    // the low or high zone - same cadence as the battery gauge's blink.
-    if (s_glucose_flash_tick > 0 && (s_glucose_flash_tick / 5) % 2 == 0) {
-      graphics_context_set_stroke_color(ctx, theme_bg());
-      graphics_draw_rect(ctx, GRect(x0 - 2, 0, iw + textw + 4, 18));
-    }
   }
 
   // brief green underline when the phone has just reconnected
@@ -1090,6 +1131,13 @@ static void tick_handler(struct tm *t, TimeUnits units) {
         kick_anim();
       }
       s_hr = newhr;
+      if (hr_out_of_range() && !s_hr_alerted) {   // blink once per crossing
+        s_hr_alerted = true;
+        s_hr_flash_tick = 1;
+        kick_anim();
+      } else if (!hr_out_of_range()) {
+        s_hr_alerted = false;
+      }
       if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
     }
   }
@@ -1101,6 +1149,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   // the top strip and the bottom strip only change minute-to-minute - don't
   // repaint them 60x a minute while a timer is running
   if (units & MINUTE_UNIT) {
+    check_glucose_stale();
     layer_mark_dirty(s_top_layer);
     if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
     bool qt = quiet_time_is_active();   // moon + dim live in the ring layer
@@ -1417,6 +1466,10 @@ static void window_load(Window *window) {
   time_t now = time(NULL);
   tick_handler(localtime(&now), MINUTE_UNIT);
   render_status();
+  // The face relaunches on every glance, so re-highlight anything out of range
+  // (the crossing latches only fire on a change, which may have happened while away).
+  if (glucose_needs_attention()) { s_glucose_flash_tick = 1; }
+  if (hr_out_of_range()) { s_hr_flash_tick = 1; }
   s_intro_tick = 1;    // launch stagger: ring sweep -> time roll-in -> line slide
   s_spark_tick = 1;    // ... with the sparkline growing up alongside
   kick_anim();
