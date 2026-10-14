@@ -44,6 +44,9 @@ function battHighVal(config) {
   var v = config && config.battHighPct;
   return (typeof v === 'number' && v >= 0 && v <= 100) ? v : 80;
 }
+function battRepeatVal(config) {
+  return !!(config && config.battRepeat);
+}
 function battSoundVal(config) {
   return !(config && config.battSound === false);
 }
@@ -211,6 +214,7 @@ function pushFaceData(state) {
     FACE_BATT_LOW_PCT: battLowVal(loadConfig()),
     FACE_BATT_HIGH_PCT: battHighVal(loadConfig()),
     FACE_BATT_SOUND: battSoundVal(loadConfig()) ? 1 : 0,
+    FACE_BATT_REPEAT: battRepeatVal(loadConfig()) ? 1 : 0,
     FACE_BATT_VOLUME_PCT: battVolumeVal(loadConfig()),
   });
 }
@@ -231,6 +235,7 @@ function doSync() {
       FACE_BATT_LOW_PCT: battLowVal(config),
       FACE_BATT_HIGH_PCT: battHighVal(config),
       FACE_BATT_SOUND: battSoundVal(config) ? 1 : 0,
+      FACE_BATT_REPEAT: battRepeatVal(config) ? 1 : 0,
       FACE_BATT_VOLUME_PCT: battVolumeVal(config),
     });
     return Promise.resolve();
@@ -469,6 +474,7 @@ function configHtml(config) {
   var battLow = battLowVal(config);
   var battHigh = battHighVal(config);
   var battSound = battSoundVal(config);
+  var battRepeat = battRepeatVal(config);
   var battVolume = battVolumeVal(config);
   var shown = (config && config.show) || {};
   var ck = function (k, lbl) {
@@ -522,6 +528,8 @@ function configHtml(config) {
     '<label for="battHigh" style="display:inline;font-weight:normal">High % (100 = off)</label></div>' +
     '<div class="row"><input id="battSound" type="checkbox"' + (battSound ? ' checked' : '') + '>' +
     '<label for="battSound">Alert sound (vibrates instead if there\'s no speaker)</label></div>' +
+    '<div class="row"><input id="battRepeat" type="checkbox"' + (battRepeat ? ' checked' : '') + '>' +
+    '<label for="battRepeat">Repeat hourly while the level stays out of range</label></div>' +
     '<label for="battVolume">Alert volume <span id="battVolumeOut">' + battVolume + '%</span></label>' +
     '<input id="battVolume" type="range" min="0" max="100" step="5" value="' + battVolume + '" ' +
     'oninput="document.getElementById(\'battVolumeOut\').textContent=this.value+\'%\'">' +
@@ -546,6 +554,7 @@ function configHtml(config) {
     'battLowPct:parseInt(g("battLow").value,10),' +
     'battHighPct:parseInt(g("battHigh").value,10),' +
     'battSound:g("battSound").checked,' +
+    'battRepeat:g("battRepeat").checked,' +
     'battVolume:parseInt(g("battVolume").value,10),' +
     'show:{steps:g("s_steps").checked,battery:g("s_battery").checked,spark:g("s_spark").checked,' +
     'hr:g("s_hr").checked,habits:g("s_habits").checked,tasks:g("s_tasks").checked}})};' +
@@ -592,6 +601,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   config.battLowPct = (lowPct >= 0 && lowPct <= 100) ? lowPct : 20;
   config.battHighPct = (highPct >= 0 && highPct <= 100) ? highPct : 80;
   config.battSound = !!r.battSound;
+  config.battRepeat = !!r.battRepeat;
   var volPct = parseInt(r.battVolume, 10);
   config.battVolume = (volPct >= 0 && volPct <= 100) ? volPct : 80;
   if (r.show) { config.show = r.show; }
@@ -607,6 +617,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     MSG_TYPE: 0, FACE_SHOW_MASK: showMask(config), FACE_THEME: themeVal(config),
     FACE_BATT_LOW_PCT: battLowVal(config), FACE_BATT_HIGH_PCT: battHighVal(config),
     FACE_BATT_SOUND: battSoundVal(config) ? 1 : 0,
+    FACE_BATT_REPEAT: battRepeatVal(config) ? 1 : 0,
     FACE_BATT_VOLUME_PCT: battVolumeVal(config),
   });  // apply toggles now
   doSync();

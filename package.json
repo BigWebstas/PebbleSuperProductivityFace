@@ -56,7 +56,8 @@
       "FACE_BATT_VOLUME_PCT",
       "FACE_GLUCOSE_SGV",
       "FACE_GLUCOSE_TREND",
-      "FACE_GLUCOSE_AGE_S"
+      "FACE_GLUCOSE_AGE_S",
+      "FACE_BATT_REPEAT"
     ]
   }
 }
