@@ -48,7 +48,7 @@
 // persist keys
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
        PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK_UNUSED, PK_LAST_OK,
-       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME, PK_BURN };
+       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME, PK_BURN, PK_BATT_ALERTED };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
@@ -1025,6 +1025,9 @@ static void parse_burn_csv(const char *csv) {
   s_burn_n = i;
 }
 
+static void check_battery_alert(BatteryChargeState bat);
+static void save_batt_latch(void);
+
 static void inbox_received(DictionaryIterator *iter, void *ctx) {
   Tuple *t;
 
@@ -1049,10 +1052,12 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
       if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
     }
   }
-  if ((t = dict_find(iter, KEY_BATT_LOW)))  { s_batt_low_pct = t->value->int32; }
-  if ((t = dict_find(iter, KEY_BATT_HIGH))) { s_batt_high_pct = t->value->int32; }
+  bool batt_cfg = false;
+  if ((t = dict_find(iter, KEY_BATT_LOW)))  { s_batt_low_pct = t->value->int32; batt_cfg = true; }
+  if ((t = dict_find(iter, KEY_BATT_HIGH))) { s_batt_high_pct = t->value->int32; batt_cfg = true; }
   if ((t = dict_find(iter, KEY_BATT_SOUND))) { s_batt_sound = t->value->int32 != 0; }
   if ((t = dict_find(iter, KEY_BATT_VOLUME))) { s_batt_volume = t->value->int32; }
+  if (batt_cfg) { check_battery_alert(battery_state_service_peek()); }  // a moved threshold may already be crossed
   bool got_done = false, got_total = false;
   char tasks_prev_fmt[16];
   format_tasks_left(tasks_prev_fmt, sizeof(tasks_prev_fmt), s_done, s_total);
@@ -1183,14 +1188,20 @@ static void play_battery_alert_cue(void) {
   vibes_enqueue_custom_pattern(pat);  // no speaker on this platform, or the sound is muted
 }
 
+static void save_batt_latch(void) {
+  persist_write_int(PK_BATT_ALERTED, (s_batt_low_alerted ? 1 : 0) | (s_batt_high_alerted ? 2 : 0));
+}
+
 // Battery health alert: flash + optional sound cue once when discharging
 // drops to/below the low threshold, or charging rises to/above the high one.
 // Each side latches so it only fires once per crossing, and re-arms once the
 // level clears back out of that zone (e.g. charging starts, or you unplug).
-// battery_state_service only calls back on an actual OS-level change, so this
-// never fires merely because the face was relaunched - see bt_handler for the
-// same relaunch-vs-live-event distinction elsewhere on this face.
+// battery_state_service only calls back on an actual OS-level change, and the
+// face isn't running while another app is in front - so the latches persist
+// and init() re-runs this check on launch, catching a threshold crossed while
+// away exactly once. A plain relaunch with no new crossing stays silent.
 static void check_battery_alert(BatteryChargeState bat) {
+  bool was_low = s_batt_low_alerted, was_high = s_batt_high_alerted;
   bool low = !bat.is_charging && s_batt_low_pct > 0 && bat.charge_percent <= s_batt_low_pct;
   bool high = bat.is_charging && s_batt_high_pct < 100 && bat.charge_percent >= s_batt_high_pct;
 
@@ -1211,6 +1222,8 @@ static void check_battery_alert(BatteryChargeState bat) {
   } else if (!high) {
     s_batt_high_alerted = false;
   }
+  // Persist on change, not just at exit: the OS can kill the face without deinit().
+  if (s_batt_low_alerted != was_low || s_batt_high_alerted != was_high) { save_batt_latch(); }
 }
 
 static void battery_handler(BatteryChargeState bat) {
@@ -1295,6 +1308,9 @@ static void load_persisted(void) {
   s_batt_high_pct = persist_exists(PK_BATT_HIGH) ? persist_read_int(PK_BATT_HIGH) : 80;
   s_batt_sound = persist_exists(PK_BATT_SOUND) ? persist_read_int(PK_BATT_SOUND) != 0 : true;
   s_batt_volume = persist_exists(PK_BATT_VOLUME) ? persist_read_int(PK_BATT_VOLUME) : 80;
+  int alerted = persist_exists(PK_BATT_ALERTED) ? persist_read_int(PK_BATT_ALERTED) : 0;
+  s_batt_low_alerted = alerted & 1;
+  s_batt_high_alerted = alerted & 2;
   if (!persist_exists(PK_TOTAL)) { return; }
   s_done = persist_read_int(PK_DONE);
   s_total = persist_read_int(PK_TOTAL);
@@ -1348,6 +1364,7 @@ static void save_persisted(void) {
   persist_write_int(PK_BATT_HIGH, s_batt_high_pct);
   persist_write_int(PK_BATT_SOUND, s_batt_sound ? 1 : 0);
   persist_write_int(PK_BATT_VOLUME, s_batt_volume);
+  save_batt_latch();
 }
 
 static void init(void) {
@@ -1362,6 +1379,7 @@ static void init(void) {
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
   accel_tap_service_subscribe(tap_handler);
   battery_state_service_subscribe(battery_handler);
+  check_battery_alert(battery_state_service_peek());  // crossed while another app was in front?
   connection_service_subscribe((ConnectionHandlers) { .pebble_app_connection_handler = bt_handler });
   s_bt = connection_service_peek_pebble_app_connection();
 
