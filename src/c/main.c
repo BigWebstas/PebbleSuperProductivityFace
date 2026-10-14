@@ -32,6 +32,7 @@
 #define KEY_BATT_HIGH        MESSAGE_KEY_FACE_BATT_HIGH_PCT  // alert once when charging rises to/above this, 100 = off
 #define KEY_BATT_SOUND       MESSAGE_KEY_FACE_BATT_SOUND    // 0/1, alert cue (speaker tone, or vibrate if there's no speaker) on either threshold
 #define KEY_BATT_VOLUME      MESSAGE_KEY_FACE_BATT_VOLUME_PCT  // speaker volume for the alert cue, 0-100
+#define KEY_BATT_REPEAT      MESSAGE_KEY_FACE_BATT_REPEAT   // 0/1, re-alert hourly while the level stays out of range
 
 #define MSG_REFRESH_REQUEST 1
 
@@ -48,7 +49,8 @@
 // persist keys
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
        PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK_UNUSED, PK_LAST_OK,
-       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME, PK_BURN, PK_BATT_ALERTED };
+       PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME, PK_BURN, PK_BATT_ALERTED,
+       PK_BATT_REPEAT, PK_BATT_LAST_ALERT };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
@@ -91,6 +93,8 @@ static int s_batt_low_pct = 20;    // 0 disables the low-side alert
 static int s_batt_high_pct = 80;   // 100 disables the high-side alert
 static bool s_batt_sound = true;
 static int s_batt_volume = 80;   // speaker volume for the alert cue, 0-100
+static bool s_batt_repeat = false;   // re-alert hourly while out of range
+static time_t s_batt_last_alert = 0; // when the battery alert last fired
 static bool s_batt_low_alerted = false;
 static bool s_batt_high_alerted = false;
 static int s_hr_flash_tick = 0;   // 0 = idle (out-of-range blink on the heart-rate reading)
@@ -126,6 +130,7 @@ static GColor s_status_color;
 #define SPARK_TICKS 8          // burndown draw-in length
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
+#define BATT_REPEAT_S (60 * 60)  // gap between repeat battery alerts
 #define BATT_FLASH_TICKS 40    // battery-threshold gauge blink length (~1.3s)
 #define HR_FLASH_TICKS 40      // out-of-range heart-rate blink length (~1.3s)
 #define HR_LOW_BPM 45          // at/below this the reading blinks
@@ -159,6 +164,7 @@ static bool s_status_warn = false;   // est-remaining overshoots the day -> red 
 static int s_status_w = 148;         // status layer width (set to fit inside the ring)
 
 static void tick_handler(struct tm *t, TimeUnits units);
+static void check_battery_alert(BatteryChargeState bat);
 static void anim_tick(void *data);
 static void render_status(void);
 static void render_status_stats(void);
@@ -1023,6 +1029,7 @@ static void tick_handler(struct tm *t, TimeUnits units) {
   // the top strip and the bottom strip only change minute-to-minute - don't
   // repaint them 60x a minute while a timer is running
   if (units & MINUTE_UNIT) {
+    if (s_batt_repeat) { check_battery_alert(battery_state_service_peek()); }
     layer_mark_dirty(s_top_layer);
     if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
     bool qt = quiet_time_is_active();   // moon + dim live in the ring layer
@@ -1092,6 +1099,7 @@ static void inbox_received(DictionaryIterator *iter, void *ctx) {
   if ((t = dict_find(iter, KEY_BATT_HIGH))) { s_batt_high_pct = t->value->int32; batt_cfg = true; }
   if ((t = dict_find(iter, KEY_BATT_SOUND))) { s_batt_sound = t->value->int32 != 0; }
   if ((t = dict_find(iter, KEY_BATT_VOLUME))) { s_batt_volume = t->value->int32; }
+  if ((t = dict_find(iter, KEY_BATT_REPEAT))) { s_batt_repeat = t->value->int32 != 0; }
   if (batt_cfg) { check_battery_alert(battery_state_service_peek()); }  // a moved threshold may already be crossed
   bool got_done = false, got_total = false;
   char tasks_prev_fmt[16];
@@ -1225,40 +1233,51 @@ static void play_battery_alert_cue(void) {
 
 static void save_batt_latch(void) {
   persist_write_int(PK_BATT_ALERTED, (s_batt_low_alerted ? 1 : 0) | (s_batt_high_alerted ? 2 : 0));
+  persist_write_int(PK_BATT_LAST_ALERT, (int)s_batt_last_alert);
+}
+
+static void fire_battery_alert(void) {
+  s_batt_last_alert = time(NULL);
+  s_batt_flash_tick = 1;
+  if (s_batt_sound) { play_battery_alert_cue(); }
+  kick_anim();
 }
 
 // Battery health alert: flash + optional sound cue once when discharging
 // drops to/below the low threshold, or charging rises to/above the high one.
 // Each side latches so it only fires once per crossing, and re-arms once the
 // level clears back out of that zone (e.g. charging starts, or you unplug).
+// With the repeat option on, a latched side fires again once an hour has passed
+// since the last alert and the level is still out of range.
 // battery_state_service only calls back on an actual OS-level change, and the
-// face isn't running while another app is in front - so the latches persist
-// and init() re-runs this check on launch, catching a threshold crossed while
-// away exactly once. A plain relaunch with no new crossing stays silent.
+// face isn't running while another app is in front - so the latches and the
+// last-alert time persist, and init() re-runs this check on launch, catching a
+// threshold crossed (or an hour elapsed) while away. A plain relaunch with no
+// new crossing stays silent.
 static void check_battery_alert(BatteryChargeState bat) {
   bool was_low = s_batt_low_alerted, was_high = s_batt_high_alerted;
+  time_t was_last = s_batt_last_alert;
   bool low = !bat.is_charging && s_batt_low_pct > 0 && bat.charge_percent <= s_batt_low_pct;
   bool high = bat.is_charging && s_batt_high_pct < 100 && bat.charge_percent >= s_batt_high_pct;
+  bool due = s_batt_repeat && time(NULL) - s_batt_last_alert >= BATT_REPEAT_S;
 
-  if (low && !s_batt_low_alerted) {
+  if (low && (!s_batt_low_alerted || due)) {
     s_batt_low_alerted = true;
-    s_batt_flash_tick = 1;
-    if (s_batt_sound) { play_battery_alert_cue(); }
-    kick_anim();
+    fire_battery_alert();
   } else if (!low) {
     s_batt_low_alerted = false;
   }
 
-  if (high && !s_batt_high_alerted) {
+  if (high && (!s_batt_high_alerted || due)) {
     s_batt_high_alerted = true;
-    s_batt_flash_tick = 1;
-    if (s_batt_sound) { play_battery_alert_cue(); }
-    kick_anim();
+    fire_battery_alert();
   } else if (!high) {
     s_batt_high_alerted = false;
   }
   // Persist on change, not just at exit: the OS can kill the face without deinit().
-  if (s_batt_low_alerted != was_low || s_batt_high_alerted != was_high) { save_batt_latch(); }
+  if (s_batt_low_alerted != was_low || s_batt_high_alerted != was_high || s_batt_last_alert != was_last) {
+    save_batt_latch();
+  }
 }
 
 static void battery_handler(BatteryChargeState bat) {
@@ -1346,6 +1365,8 @@ static void load_persisted(void) {
   s_batt_high_pct = persist_exists(PK_BATT_HIGH) ? persist_read_int(PK_BATT_HIGH) : 80;
   s_batt_sound = persist_exists(PK_BATT_SOUND) ? persist_read_int(PK_BATT_SOUND) != 0 : true;
   s_batt_volume = persist_exists(PK_BATT_VOLUME) ? persist_read_int(PK_BATT_VOLUME) : 80;
+  s_batt_repeat = persist_exists(PK_BATT_REPEAT) ? persist_read_int(PK_BATT_REPEAT) != 0 : false;
+  s_batt_last_alert = persist_exists(PK_BATT_LAST_ALERT) ? (time_t)persist_read_int(PK_BATT_LAST_ALERT) : 0;
   int alerted = persist_exists(PK_BATT_ALERTED) ? persist_read_int(PK_BATT_ALERTED) : 0;
   s_batt_low_alerted = alerted & 1;
   s_batt_high_alerted = alerted & 2;
@@ -1402,6 +1423,7 @@ static void save_persisted(void) {
   persist_write_int(PK_BATT_HIGH, s_batt_high_pct);
   persist_write_int(PK_BATT_SOUND, s_batt_sound ? 1 : 0);
   persist_write_int(PK_BATT_VOLUME, s_batt_volume);
+  persist_write_int(PK_BATT_REPEAT, s_batt_repeat ? 1 : 0);
   save_batt_latch();
 }
 

@@ -53,7 +53,8 @@
       "FACE_BATT_LOW_PCT",
       "FACE_BATT_HIGH_PCT",
       "FACE_BATT_SOUND",
-      "FACE_BATT_VOLUME_PCT"
+      "FACE_BATT_VOLUME_PCT",
+      "FACE_BATT_REPEAT"
     ]
   }
 }
