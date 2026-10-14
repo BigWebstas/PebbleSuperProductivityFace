@@ -93,6 +93,8 @@ static bool s_batt_sound = true;
 static int s_batt_volume = 80;   // speaker volume for the alert cue, 0-100
 static bool s_batt_low_alerted = false;
 static bool s_batt_high_alerted = false;
+static int s_hr_flash_tick = 0;   // 0 = idle (out-of-range blink on the heart-rate reading)
+static bool s_hr_alerted = false;
 static int s_batt_flash_tick = 0;   // 0 = idle (threshold-crossed flash on the gauge)
 static bool s_light = false;    // false = black bg (default), true = white bg
 static int s_moon_cy = 0;       // Quiet Time moon centre, screen y (set in window_load)
@@ -125,6 +127,9 @@ static GColor s_status_color;
 #define BEAT_TICKS 5           // heart-rate thump length
 #define BT_FLASH_TICKS 12      // reconnect underline length
 #define BATT_FLASH_TICKS 40    // battery-threshold gauge blink length (~1.3s)
+#define HR_FLASH_TICKS 40      // out-of-range heart-rate blink length (~1.3s)
+#define HR_LOW_BPM 45          // at/below this the reading blinks
+#define HR_HIGH_BPM 120        // at/above this the reading blinks
 #define INTRO_TICKS 12         // launch stagger length
 #define TIME_TEXT_DY (-8)      // Bitham-42 top gap, so the minute sits centred
 static AppTimer *s_anim_timer = NULL;
@@ -211,6 +216,16 @@ static GColor theme_green(void) {
 // lighter red there, plain red stays on white.
 static GColor theme_heart(void) {
   return PBL_IF_COLOR_ELSE(s_light ? GColorRed : GColorSunsetOrange, theme_fg());
+}
+
+// Blinking highlight: a filled box with the content inverted, on for 5 ticks
+// then off for 5. Same cadence the battery gauge uses.
+static bool flash_on(int tick) { return tick > 0 && (tick / 5) % 2 == 0; }
+static GColor alert_fill(void) { return PBL_IF_COLOR_ELSE(GColorRed, theme_fg()); }
+static GColor alert_ink(void)  { return PBL_IF_COLOR_ELSE(GColorWhite, theme_bg()); }
+
+static bool hr_out_of_range(void) {
+  return s_hr > 0 && (s_hr <= HR_LOW_BPM || s_hr >= HR_HIGH_BPM);
 }
 
 // ---------- helpers ----------
@@ -556,6 +571,12 @@ static void anim_tick(void *data) {
     else { more = true; }
     layer_mark_dirty(s_top_layer);
   }
+  if (s_hr_flash_tick > 0) {
+    s_hr_flash_tick++;
+    if (s_hr_flash_tick > HR_FLASH_TICKS) { s_hr_flash_tick = 0; }
+    else { more = true; }
+    if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
+  }
   if (s_intro_tick > 0) {
     if (s_intro_tick == 2 && s_time_roll_tick == 0) { s_time_prev[0] = '\0'; s_time_roll_tick = 1; }
     if (s_intro_tick == 5) { s_status_prev[0] = '\0'; s_slide_tick = 1; }
@@ -723,7 +744,16 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
 
   // heart rate, left: a tiny heart + BPM (thumps on a fresh reading)
   if ((s_show & SHOW_HR) && s_hr > 0) {
-    GColor hc = dim ? GColorDarkGray : theme_heart();
+    char hb[8];
+    snprintf(hb, sizeof(hb), "%d", s_hr);
+    bool hflash = flash_on(s_hr_flash_tick);
+    if (hflash) {
+      int hw = graphics_text_layout_get_content_size(
+          hb, f18, GRect(0, 0, 40, 20), GTextOverflowModeFill, GTextAlignmentLeft).w;
+      graphics_context_set_fill_color(ctx, alert_fill());
+      graphics_fill_rect(ctx, GRect(lx - 3, 0, 12 + 3 + hw + 4, 19), 3, GCornersAll);
+    }
+    GColor hc = hflash ? alert_ink() : dim ? GColorDarkGray : theme_heart();
     int hy = 5;
     int sw = (s_beat_tick >= 1 && s_beat_tick <= 2) ? 1 : 0;
     graphics_context_set_fill_color(ctx, hc);
@@ -731,9 +761,7 @@ static void lower_update_proc(Layer *layer, GContext *ctx) {
     graphics_fill_circle(ctx, GPoint(lx + 6, hy + 3), 2 + sw);
     graphics_fill_rect(ctx, GRect(lx - sw, hy + 3, 8 + 2 * sw, 3 + sw), 0, GCornerNone);
     graphics_fill_rect(ctx, GRect(lx + 2 - sw, hy + 6 + sw, 4 + 2 * sw, 2), 0, GCornerNone);
-    char hb[8];
-    snprintf(hb, sizeof(hb), "%d", s_hr);
-    graphics_context_set_text_color(ctx, hc);
+    graphics_context_set_text_color(ctx, hflash ? alert_ink() : dim ? GColorDarkGray : theme_fg());
     draw_rolled(ctx, f18, GRect(lx + 12, 0, 40, 18), hb, s_hr_prev,
                s_hr_roll_tick, HR_ROLL_TICKS, GTextAlignmentLeft);
   }
@@ -977,6 +1005,13 @@ static void tick_handler(struct tm *t, TimeUnits units) {
         kick_anim();
       }
       s_hr = newhr;
+      if (hr_out_of_range() && !s_hr_alerted) {   // blink once per crossing
+        s_hr_alerted = true;
+        s_hr_flash_tick = 1;
+        kick_anim();
+      } else if (!hr_out_of_range()) {
+        s_hr_alerted = false;
+      }
       if (s_lower_layer) { layer_mark_dirty(s_lower_layer); }
     }
   }
@@ -1284,6 +1319,9 @@ static void window_load(Window *window) {
   time_t now = time(NULL);
   tick_handler(localtime(&now), MINUTE_UNIT);
   render_status();
+  // The face relaunches on every glance, so re-highlight a reading that's out
+  // of range (the crossing latch only fires on a change, possibly while away).
+  if (hr_out_of_range()) { s_hr_flash_tick = 1; }
   s_intro_tick = 1;    // launch stagger: ring sweep -> time roll-in -> line slide
   s_spark_tick = 1;    // ... with the sparkline growing up alongside
   kick_anim();
