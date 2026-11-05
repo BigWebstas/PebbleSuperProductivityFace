@@ -318,6 +318,10 @@ static void render_status(void) {
     strncpy(s_status_buf, "Syncing…", sizeof(s_status_buf));
   } else if (s_status == 2) {
     strncpy(s_status_buf, "Open the app to pair", sizeof(s_status_buf));
+  } else if (s_status == 3 && s_total == 0 && !is_tracking()) {
+    // failed with nothing cached (e.g. fresh install) - don't pass an error off as an empty day
+    strncpy(s_status_buf, "Sync failed - tap to retry", sizeof(s_status_buf));
+    s_status_color = PBL_IF_COLOR_ELSE(GColorRed, theme_fg());
   } else if (is_tracking()) {
     int e = track_now_elapsed_s();
     int h = e / 3600, m = (e % 3600) / 60;
