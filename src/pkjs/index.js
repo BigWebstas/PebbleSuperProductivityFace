@@ -301,8 +301,12 @@ function doSync() {
   }).catch(function (err) {
     console.log('[spf] sync failed: ' + (err && err.message ? err.message : JSON.stringify(err)));
     sendStatus(STATUS_ERROR);
-    // still show whatever the cache has
-    try { pushFaceData(loadState()); } catch (e) {}
+    // still show whatever the cache has - but an empty cache would push
+    // STATUS_OK and bury the error behind "Nothing planned today"
+    try {
+      var cached = loadState();
+      if (Object.keys(cached.task || {}).length) { pushFaceData(cached); }
+    } catch (e) {}
   }).then(function () { syncInFlight = false; });
 }
 
