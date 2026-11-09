@@ -55,8 +55,10 @@
 enum { PK_DONE = 1, PK_TOTAL, PK_WORKED, PK_EST, PK_NEXT_MIN, PK_NEXT_TITLE,
        PK_HAB_DONE, PK_HAB_TOTAL, PK_HAB_STREAK, PK_HAB_TITLE, PK_WEEK, PK_LAST_OK,
        PK_SHOW, PK_THEME, PK_BATT_LOW, PK_BATT_HIGH, PK_BATT_SOUND, PK_BATT_VOLUME,
-       PK_GLUCOSE_SGV, PK_GLUCOSE_TREND, PK_GLUCOSE_AGE, PK_GLUCOSE_RX, PK_BATT_ALERTED,
-       PK_BATT_REPEAT, PK_BATT_LAST_ALERT };
+       PK_BURN_UNUSED /* main's burndown CSV lives at 19 - keep ids in lockstep with main */,
+       PK_BATT_ALERTED, PK_BATT_REPEAT, PK_BATT_LAST_ALERT,
+       // glucose keys go at the END so they never alias a key main wrote with a different type
+       PK_GLUCOSE_SGV, PK_GLUCOSE_TREND, PK_GLUCOSE_AGE, PK_GLUCOSE_RX };
 
 #define STALE_AFTER_S (60 * 60)   // grey the line once the last good sync is this old
 #define LINE_MODES 5
