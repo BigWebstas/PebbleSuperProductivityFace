@@ -925,16 +925,17 @@ static void top_update_proc(Layer *layer, GContext *ctx) {
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
 
-  // steps, left: a small shoe glyph + comma-grouped count
+  // steps, left: two shoe prints + comma-grouped count
 #if defined(PBL_HEALTH)
   if ((s_show & SHOW_STEPS) && s_steps > 0) {
-    int sx = 6, sy = 6;
+    int sx = 6, sy = 2;
     graphics_context_set_fill_color(ctx, fg);
-    graphics_fill_rect(ctx, GRect(sx + 2, sy + 3, 8, 2), 0, GCornerNone); // upper
-    graphics_fill_rect(ctx, GRect(sx + 1, sy + 5, 10, 2), 0, GCornerNone); // body
-    graphics_fill_circle(ctx, GPoint(sx + 10, sy + 6), 3);                // toe
-    graphics_fill_circle(ctx, GPoint(sx + 2, sy + 7), 2);                 // heel
-    graphics_fill_rect(ctx, GRect(sx, sy + 8, 12, 1), 0, GCornerNone);    // sole
+    // two staggered shoe-sole prints (sole + separate heel): left foot
+    // planted low, right foot stepping forward and higher
+    graphics_fill_rect(ctx, GRect(sx,      sy + 6,  5, 7), 2, GCornersAll); // left sole
+    graphics_fill_rect(ctx, GRect(sx + 1,  sy + 14, 3, 3), 1, GCornersAll); // left heel
+    graphics_fill_rect(ctx, GRect(sx + 8,  sy,      5, 7), 2, GCornersAll); // right sole
+    graphics_fill_rect(ctx, GRect(sx + 9,  sy + 8,  3, 3), 1, GCornersAll); // right heel
     draw_comma_int(ctx, fonts_get_system_font(FONT_KEY_GOTHIC_18),
                    GRect(sx + 15, 0, b.size.w / 2 - 15, 18), s_steps, GTextAlignmentLeft);
   }
